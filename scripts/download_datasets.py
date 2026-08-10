@@ -7,7 +7,7 @@ everything is configurable via CLI args (see AGENT.md conventions).
     python scripts/download_datasets.py --dataset all --data-dir data
 
 Datasets:
-  - PlantVillage  Hugging Face "mohanty/PlantVillage" (color config)
+  - PlantVillage  Hugging Face "mohanty/PlantVillage" (default config = color images)
   - PlantDoc      GitHub "pratikkayal/PlantDoc-Dataset" (git clone)
 
 If a dataset already exists it is skipped (use --force to re-download).
@@ -22,7 +22,6 @@ from pathlib import Path
 DATASETS = ("plantvillage", "plantdoc")
 
 PLANTVILLAGE_HF_ID = "mohanty/PlantVillage"
-PLANTVILLAGE_HF_CONFIG = "color"
 PLANTDOC_REPO_URL = "https://github.com/pratikkayal/PlantDoc-Dataset.git"
 
 
@@ -65,11 +64,19 @@ def download_plantvillage(data_dir: Path, sample_limit: int | None, force: bool)
     except ImportError as exc:
         sys.exit(f"Missing dependency: {exc}\n  pip install datasets  (see requirements.txt)")
 
-    print(f"[plantvillage] downloading {PLANTVILLAGE_HF_ID} ({PLANTVILLAGE_HF_CONFIG}) via Hugging Face ...")
-    dataset = load_dataset(PLANTVILLAGE_HF_ID, PLANTVILLAGE_HF_CONFIG, split="train")
+    print(f"[plantvillage] downloading {PLANTVILLAGE_HF_ID} via Hugging Face ...")
+    print("[plantvillage] first download is data.zip (~2 GB), extracted once into the HF cache; this can take a few minutes")
+    try:
+        # The repo is a custom loading script (plant_village.py) that only defines a
+        # "default" config (= color images) and needs trust_remote_code=True. It also
+        # ships its own leaf-grouped train/test splits, so use split="all" to get
+        # every image and let organize_datasets.py do our 80/10/10 split.
+        dataset = load_dataset(PLANTVILLAGE_HF_ID, split="all", trust_remote_code=True)
+    except Exception as exc:  # noqa: BLE001 - report the real cause to the user
+        sys.exit(f"[plantvillage] failed to load dataset: {exc}")
 
     label_col = "label" if "label" in dataset.column_names else dataset.column_names[-1]
-    id_col = next((c for c in ("image_id", "filename") if c in dataset.column_names), None)
+    id_col = next((c for c in ("image_path", "image_id", "filename") if c in dataset.column_names), None)
 
     count, failed = 0, 0
     for i, row in enumerate(dataset):
@@ -78,9 +85,15 @@ def download_plantvillage(data_dir: Path, sample_limit: int | None, force: bool)
         label = str(row[label_col]).replace("/", "_")
         class_dir = out / label
         class_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{row[id_col]}.jpg" if id_col else f"{label}_{i:06d}.jpg"
+        if id_col:
+            name = f"{Path(str(row[id_col])).stem}.jpg"
+        else:
+            name = f"{label}_{i:06d}.jpg"
         try:
             image = row["image"]
+            if isinstance(image, str):
+                from PIL import Image
+                image = Image.open(image)
             if image.mode != "RGB":
                 image = image.convert("RGB")
             image.save(class_dir / name, "JPEG", quality=95)
