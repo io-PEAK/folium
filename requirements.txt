@@ -1,0 +1,12 @@
+torch
+torchvision
+albumentations
+numpy
+pandas
+scikit-learn
+opencv-python-headless
+Pillow
+tqdm
+matplotlib
+datasets
+gdown

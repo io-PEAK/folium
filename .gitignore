@@ -1,0 +1,23 @@
+AGENT.md
+final_brief_and_plan.md
+ieee_paper_template.docx
+
+# Data (downloaded on Colab / Google Drive, never committed)
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Models / checkpoints
+*.pth
+*.pt
+checkpoints/
+
+# Notebook scratch
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
