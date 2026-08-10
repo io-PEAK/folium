@@ -8,5 +8,3 @@ opencv-python-headless
 Pillow
 tqdm
 matplotlib
-datasets
-gdown

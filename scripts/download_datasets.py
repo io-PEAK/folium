@@ -7,13 +7,17 @@ everything is configurable via CLI args (see AGENT.md conventions).
     python scripts/download_datasets.py --dataset all --data-dir data
 
 Datasets:
-  - PlantVillage  Hugging Face "mohanty/PlantVillage" (default config = color images)
+  - PlantVillage  GitHub "spMohanty/PlantVillage-Dataset" — sparse checkout of
+                  "raw/color" only (~1 GB), so no grayscale/segmented data and
+                  no full-repo clone. Uses the same color images as the Hugging
+                  Face "mohanty/PlantVillage" mirror.
   - PlantDoc      GitHub "pratikkayal/PlantDoc-Dataset" (git clone)
 
+The heavy PlantVillage checkout is done in --work-dir (session scratch on
+Colab) and the final raw/color class folders are moved under --data-dir.
 If a dataset already exists it is skipped (use --force to re-download).
 """
 import argparse
-import os
 import shutil
 import subprocess
 import sys
@@ -21,7 +25,8 @@ from pathlib import Path
 
 DATASETS = ("plantvillage", "plantdoc")
 
-PLANTVILLAGE_HF_ID = "mohanty/PlantVillage"
+PLANTVILLAGE_GITHUB_REPO = "https://github.com/spMohanty/PlantVillage-Dataset.git"
+PLANTVILLAGE_SUBDIR = "raw/color"
 PLANTDOC_REPO_URL = "https://github.com/pratikkayal/PlantDoc-Dataset.git"
 
 
@@ -52,57 +57,49 @@ def _check_case_sensitive() -> bool:
         probe_b.unlink(missing_ok=True)
 
 
-def download_plantvillage(data_dir: Path, sample_limit: int | None, force: bool) -> int:
+def download_plantvillage(data_dir: Path, work_dir: Path, force: bool) -> int:
     out = data_dir / "plantvillage" / "raw"
     existing = _count_images(out)
     if existing and not force:
         print(f"[plantvillage] {existing} images already present at {out}; skipping (use --force to re-download)")
         return existing
 
+    work_dir.mkdir(parents=True, exist_ok=True)
+    clone_dir = work_dir / "plantvillage_repo"
+    if clone_dir.exists():
+        shutil.rmtree(clone_dir)
+
+    print(f"[plantvillage] sparse-checking out '{PLANTVILLAGE_SUBDIR}' from {PLANTVILLAGE_GITHUB_REPO} ...")
+    print("[plantvillage] this downloads only the ~1 GB of color images; a few minutes on Colab")
     try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        sys.exit(f"Missing dependency: {exc}\n  pip install datasets  (see requirements.txt)")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse", PLANTVILLAGE_GITHUB_REPO, str(clone_dir)],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(clone_dir), "sparse-checkout", "set", PLANTVILLAGE_SUBDIR], check=True)
+    except subprocess.CalledProcessError as exc:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        sys.exit(f"[plantvillage] git checkout failed: {exc}")
 
-    print(f"[plantvillage] downloading {PLANTVILLAGE_HF_ID} via Hugging Face ...")
-    print("[plantvillage] first download is data.zip (~2 GB), extracted once into the HF cache; this can take a few minutes")
-    try:
-        # The repo is a custom loading script (plant_village.py) that only defines a
-        # "default" config (= color images) and needs trust_remote_code=True. It also
-        # ships its own leaf-grouped train/test splits, so use split="all" to get
-        # every image and let organize_datasets.py do our 80/10/10 split.
-        dataset = load_dataset(PLANTVILLAGE_HF_ID, split="all", trust_remote_code=True)
-    except Exception as exc:  # noqa: BLE001 - report the real cause to the user
-        sys.exit(f"[plantvillage] failed to load dataset: {exc}")
+    src = clone_dir / "raw" / "color"
+    if not src.is_dir():
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        sys.exit(f"[plantvillage] expected '{src}' not found after checkout; aborting")
 
-    label_col = "label" if "label" in dataset.column_names else dataset.column_names[-1]
-    id_col = next((c for c in ("image_path", "image_id", "filename") if c in dataset.column_names), None)
+    out.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for class_dir in sorted(src.iterdir()):
+        if not class_dir.is_dir():
+            continue
+        dest = out / class_dir.name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(class_dir), str(dest))
+        moved += 1
+    shutil.rmtree(clone_dir, ignore_errors=True)
 
-    count, failed = 0, 0
-    for i, row in enumerate(dataset):
-        if sample_limit is not None and i >= sample_limit:
-            break
-        label = str(row[label_col]).replace("/", "_")
-        class_dir = out / label
-        class_dir.mkdir(parents=True, exist_ok=True)
-        if id_col:
-            name = f"{Path(str(row[id_col])).stem}.jpg"
-        else:
-            name = f"{label}_{i:06d}.jpg"
-        try:
-            image = row["image"]
-            if isinstance(image, str):
-                from PIL import Image
-                image = Image.open(image)
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            image.save(class_dir / name, "JPEG", quality=95)
-            count += 1
-        except Exception as exc:  # noqa: BLE001 - keep going on corrupt images
-            failed += 1
-            print(f"[plantvillage]  WARN: failed to save row {i} ({label}): {exc}")
-
-    print(f"[plantvillage] saved {count} images to {out}" + (f" ({failed} skipped)" if failed else ""))
+    count = _count_images(out)
+    print(f"[plantvillage] moved {moved} class folders, {count} images -> {out}")
     return count
 
 
@@ -131,15 +128,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", choices=(*DATASETS, "all"), default="all", help="which dataset to download (default: all)")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="root directory for datasets (default: data)")
+    parser.add_argument("--work-dir", type=Path, default=None, help="scratch directory for the ~1 GB PlantVillage checkout (default: --data-dir; on Colab use /content/folium_cache so Drive isn't cluttered)")
     parser.add_argument("--force", action="store_true", help="re-download/re-clone even if data exists")
-    parser.add_argument("--sample-limit", type=int, default=None, help="download only the first N PlantVillage images (dev/testing; re-run without it and with --force for the full set)")
     args = parser.parse_args()
 
     data_dir = args.data_dir.resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = (args.work_dir or args.data_dir).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     if args.dataset in ("plantvillage", "all"):
-        download_plantvillage(data_dir, args.sample_limit, args.force)
+        download_plantvillage(data_dir, work_dir, args.force)
     if args.dataset in ("plantdoc", "all"):
         download_plantdoc(data_dir, args.force)
 
