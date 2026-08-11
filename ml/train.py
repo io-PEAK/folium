@@ -41,9 +41,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32, help="training/validation batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Adam learning rate (head only)")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="Adam weight decay")
-    parser.add_argument("--image-size", type=int, default=224, help="center-crop size fed to the model")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="random seed")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"), help="where checkpoints are saved")
+    parser.add_argument("--tag", default="stage1", help="artifact tag used in checkpoint filenames, e.g. stage1 (baseline) or stage1_aug")
+    parser.add_argument("--augment", action="store_true", help="apply the Sprint 3 albumentations pipeline to the training split")
     parser.add_argument("--resume", type=Path, default=None, help="checkpoint to resume training from")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
@@ -158,6 +159,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        augment=args.augment,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": "mobilenet_v2", "pretrained": True, "freeze": True}
     model = build_model(**model_kwargs).to(device)
@@ -176,20 +178,21 @@ def main() -> None:
         best_val_acc = ckpt.get("val_acc", 0.0)
         print(f"Resumed from {args.resume} at epoch {ckpt['epoch']} (best val acc {best_val_acc:.4f})")
 
-    print(f"Training head-only on {len(class_names)} classes, {args.epochs} epochs, lr={args.lr}", flush=True)
+    print(f"Training head-only on {len(class_names)} classes, {args.epochs} epochs, lr={args.lr}, "
+          f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
         print(f"epoch {epoch:02d}/{args.epochs}: train loss {train_loss:.4f} acc {train_acc:.4f} | val loss {val_loss:.4f} acc {val_acc:.4f}", flush=True)
 
         save_checkpoint(
-            args.checkpoint_dir / f"{args.dataset}_stage1_epoch{epoch:02d}.pt",
+            args.checkpoint_dir / f"{args.dataset}_{args.tag}_epoch{epoch:02d}.pt",
             model, optimizer, scaler, epoch, val_acc, class_names, model_kwargs,
         )
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             save_checkpoint(
-                args.checkpoint_dir / f"best_{args.dataset}_stage1.pt",
+                args.checkpoint_dir / f"best_{args.dataset}_{args.tag}.pt",
                 model, optimizer, scaler, epoch, val_acc, class_names, model_kwargs,
             )
 

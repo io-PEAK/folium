@@ -1,6 +1,6 @@
 torch
 torchvision
-albumentations
+albumentations>=2.0.0
 numpy
 pandas
 scikit-learn
