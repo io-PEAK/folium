@@ -17,6 +17,14 @@ what the ablation study and cross-dataset evaluation use later.
 Run after scripts/download_datasets.py:
 
     python scripts/organize_datasets.py --data-dir data
+
+Raw images are read from --raw-dir (default: --data-dir). On Colab, raw lives
+on Google Drive while the organized splits are written locally so the heavy
+copies don't hit the flaky Drive FUSE mount:
+
+    python scripts/organize_datasets.py \
+        --raw-dir /content/drive/MyDrive/folium/data \
+        --data-dir /content/folium_data
 """
 import argparse
 import json
@@ -95,8 +103,8 @@ def _copy(files: list[Path], dst_dir: Path) -> int:
     return len(files)
 
 
-def organize_plantvillage(data_dir: Path, seed: int, val_frac: float, test_frac: float) -> dict:
-    raw = data_dir / "plantvillage" / "raw"
+def organize_plantvillage(data_dir: Path, raw_dir: Path, seed: int, val_frac: float, test_frac: float) -> dict:
+    raw = raw_dir / "plantvillage" / "raw"
     print(f"[plantvillage] organizing {raw} ...")
     summary = {}
     total = 0
@@ -117,8 +125,8 @@ def organize_plantvillage(data_dir: Path, seed: int, val_frac: float, test_frac:
     return summary
 
 
-def organize_plantdoc(data_dir: Path, seed: int, val_frac: float) -> dict:
-    raw = data_dir / "plantdoc" / "raw"
+def organize_plantdoc(data_dir: Path, raw_dir: Path, seed: int, val_frac: float) -> dict:
+    raw = raw_dir / "plantdoc" / "raw"
     print(f"[plantdoc] organizing {raw} ...")
     summary = {}
 
@@ -171,7 +179,8 @@ def write_class_map(data_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="root directory for datasets (default: data)")
+    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="root directory where train/val/test and class_map.json are written (default: data)")
+    parser.add_argument("--raw-dir", type=Path, default=None, help="directory holding <dataset>/raw to read images from (default: --data-dir; point this at the Drive data dir when splits are written locally)")
     parser.add_argument("--datasets", choices=("plantvillage", "plantdoc", "both"), default="both", help="which dataset(s) to organize (default: both)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="random seed for reproducible splits (default: 42)")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="validation fraction of the training data (default: 0.1)")
@@ -179,11 +188,12 @@ def main() -> None:
     args = parser.parse_args()
 
     data_dir = args.data_dir.resolve()
+    raw_dir = (args.raw_dir or args.data_dir).resolve()
 
     if args.datasets in ("plantvillage", "both"):
-        organize_plantvillage(data_dir, args.seed, args.val_fraction, args.test_fraction)
+        organize_plantvillage(data_dir, raw_dir, args.seed, args.val_fraction, args.test_fraction)
     if args.datasets in ("plantdoc", "both"):
-        organize_plantdoc(data_dir, args.seed, args.val_fraction)
+        organize_plantdoc(data_dir, raw_dir, args.seed, args.val_fraction)
 
     write_class_map(data_dir)
 
