@@ -124,7 +124,12 @@ def log_ablation_row(
         columns=ABLATION_COLUMNS,
     )
     if path.exists():
-        existing = pd.read_csv(path)
+        existing = pd.read_csv(path).drop_duplicates()
+        # Skip exact duplicates: re-running evaluate on the same checkpoint must
+        # not bloat the source-of-truth table (it also cleans old dup rows).
+        if (existing.astype(str) == row.astype(str).iloc[0]).all(axis=1).any():
+            print(f"Skipped duplicate ablation row (already logged) -> {path.resolve()}")
+            return
         df = pd.concat([existing, row], ignore_index=True)
     else:
         df = row
