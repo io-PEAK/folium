@@ -31,6 +31,8 @@ from tqdm import tqdm
 from .data_loading import build_loaders
 from .model import build_model
 
+CM_ANNOT_THRESHOLD_PERCENT = 2.0  # only annotate percent cells at least this significant
+
 ABLATION_COLUMNS = [
     "variant",
     "dataset",
@@ -63,6 +65,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results", type=Path, default=Path("results/ablation_results.csv"), help="ablation CSV to append to")
     parser.add_argument("--variant", default="baseline_pv_only_no_aug", help="experiment name written in the CSV row")
     parser.add_argument("--confusion-path", type=Path, default=Path("results/confusion_matrix.png"), help="confusion matrix output PNG")
+    parser.add_argument("--cm-style", choices=("raw", "percent"), default="percent",
+                        help="confusion matrix rendering: 'percent' (row-normalized, annotated; "
+                             "small errors stay visible despite class imbalance) or 'raw' (counts)")
     return parser.parse_args()
 
 
@@ -79,19 +84,54 @@ def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, dev
     return np.asarray(all_preds), np.asarray(all_labels)
 
 
-def plot_confusion_matrix(cm: np.ndarray, class_names: list[str], path: Path) -> None:
+def plot_confusion_matrix(
+    cm: np.ndarray,
+    class_names: list[str],
+    path: Path,
+    style: str = "percent",
+) -> None:
+    """Render the confusion matrix to PNG.
+
+    style="percent" (default): each actual-class row is normalized so a cell
+    shows what % of that class was predicted as the column. This makes small
+    error rates visible and classes comparable despite test-set imbalance.
+    Cells >= CM_ANNOT_THRESHOLD_PERCENT are annotated (diagonal shows each
+    class's recall; only meaningful confusions show off-diagonal).
+
+    style="raw": raw image counts (original behavior, unannotated).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if style == "percent":
+        row_sums = cm.sum(axis=1, keepdims=True)
+        matrix = np.divide(
+            cm, row_sums, out=np.zeros_like(cm, dtype=float), where=row_sums != 0
+        ) * 100
+        vmin, vmax, label = 0, 100, "% of actual class (row)"
+    else:
+        matrix = cm.astype(float)
+        vmin = vmax = None
+        label = "images"
+
     fig, ax = plt.subplots(figsize=(16, 14))
-    im = ax.imshow(cm, cmap="Blues")
+    im = ax.imshow(matrix, cmap="Blues", vmin=vmin, vmax=vmax)
+    if style == "percent":
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                v = matrix[i, j]
+                if v < CM_ANNOT_THRESHOLD_PERCENT:
+                    continue
+                ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=6,
+                        color="white" if v > 50 else "black")
+
     ax.set_xticks(range(len(class_names)), class_names, rotation=90, fontsize=6)
     ax.set_yticks(range(len(class_names)), class_names, fontsize=6)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual")
-    fig.colorbar(im, ax=ax, fraction=0.046)
+    fig.colorbar(im, ax=ax, fraction=0.046, label=label)
     fig.tight_layout()
     fig.savefig(path, dpi=100)
     plt.close(fig)
-    print(f"Confusion matrix -> {path.resolve()}")
+    print(f"Confusion matrix -> {path.resolve()} (style={style})")
 
 
 def log_ablation_row(
@@ -166,7 +206,7 @@ def main() -> None:
     print(f"  f1        {f1:.4f}")
 
     cm = confusion_matrix(labels, preds, labels=range(len(class_names)))
-    plot_confusion_matrix(cm, class_names, args.confusion_path)
+    plot_confusion_matrix(cm, class_names, args.confusion_path, style=args.cm_style)
 
     log_ablation_row(
         args.results,
