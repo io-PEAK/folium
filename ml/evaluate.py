@@ -165,9 +165,12 @@ def log_ablation_row(
     )
     if path.exists():
         existing = pd.read_csv(path).drop_duplicates()
-        # Skip exact duplicates: re-running evaluate on the same checkpoint must
-        # not bloat the source-of-truth table (it also cleans old dup rows).
-        if (existing.astype(str) == row.astype(str).iloc[0]).all(axis=1).any():
+        # Skip re-logging the same run: key on the identity columns (not the
+        # full row, whose timestamp differs every run). Re-running evaluate on
+        # the same checkpoint/variant must not bloat the source-of-truth table.
+        identity = ["variant", "dataset", "split", "checkpoint"]
+        new_id = row[identity].astype(str).iloc[0]
+        if (existing[identity].astype(str) == new_id).all(axis=1).any():
             print(f"Skipped duplicate ablation row (already logged) -> {path.resolve()}")
             return
         df = pd.concat([existing, row], ignore_index=True)
