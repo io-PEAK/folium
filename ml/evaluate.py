@@ -64,11 +64,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--results", type=Path, default=Path("results/ablation_results.csv"), help="ablation CSV to append to")
     parser.add_argument("--variant", default="baseline_pv_only_no_aug", help="experiment name written in the CSV row")
-    parser.add_argument("--confusion-path", type=Path, default=Path("results/confusion_matrix.png"), help="confusion matrix output PNG")
+    parser.add_argument("--confusion-path", type=Path, default=None,
+                        help="confusion matrix output PNG (default: <results-dir>/cm_<variant>.png, "
+                             "so each sprint/variant keeps its own matrix)")
     parser.add_argument("--cm-style", choices=("raw", "percent"), default="percent",
                         help="confusion matrix rendering: 'percent' (row-normalized, annotated; "
                              "small errors stay visible despite class imbalance) or 'raw' (counts)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.confusion_path is None:
+        stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.variant)
+        args.confusion_path = args.results.parent / f"cm_{stem}.png"
+    return args
 
 
 @torch.no_grad()
