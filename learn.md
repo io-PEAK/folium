@@ -32,6 +32,67 @@ GPU, deterministic seed 42.
 - **Extras:** Albumentations augmentation (train only), `--map-to-pv`/`--mix-with` for cross-dataset
   label alignment.
 
+### Simple-explanations cheat-sheet (recent Q&A, summary)
+
+**Weights** = the model's learnable "dials." Each connection between layers has a number saying how
+strongly it matters. MobileNetV2 ≈ 2.2M weights; the head `Linear(1280, 38)` adds ~49k. Training tunes
+them; the checkpoint IS them (`state_dict`).
+
+**Gradient** = "which way is downhill," per weight. The loss is one number (how wrong); the gradient is
+one number per weight saying *which direction* reduces the error and how steep the slope is there.
+
+**Backpropagation** = the algorithm that computes every weight's gradient in one pass — walks the error
+backward layer by layer (chain rule), handing each weight its share of the blame. That's `loss.backward()`.
+
+**The training step (per batch of 32):**
+1. **forward** — images → model → 38 scores (logits)
+2. **loss** — `CrossEntropyLoss`: how wrong (tiny if true class scored highest)
+3. **backward** — `loss.backward()` fills every gradient
+4. **update** — `optimizer.step()` (Adam) nudges each weight against its gradient
+5. repeat over ~1,357 batches = **1 epoch**; validate, save best checkpoint
+
+**Adam** = the optimizer (weight-update rule). Momentum (rolls smoothly downhill) + per-weight adaptive
+step size (rarely-updated weights get bigger steps). Faster, stabler, little LR tuning. Our version has
+two param groups: backbone `lr 1e-4`, head `lr 1e-3` (`ml/train.py`).
+
+**Checkpoint** = a saved snapshot (`.pt`): weights + `class_names` + `model_kwargs` + epoch/val_acc +
+optimizer/scaler state. `best_*.pt` = best-on-validation. Used by evaluate (score), `--init-from`
+(warm-start fine-tune), predict (single image).
+
+**Validation vs test** — validation picks the best checkpoint every epoch (steers training, slightly
+"seen"); test is scored once at the end by `ml/evaluate` (referee, never seen) — the CSV rows the
+verdict reads are all `*_test`.
+
+**Train/val/test split** — PlantVillage: stratified per-class 80/10/10, seed 42 → 43,429 / 5,417 /
+5,459. PlantDoc: keeps its shipped test (236), carves 10% of train as val → 2,107 / 235 / 236 (230
+mapped for eval). Same seed = same test set every run.
+
+**Fine-tuning** = keep training an already-trained model on new data, carefully (warm start + low LR +
+partial unfreeze) so it adapts without erasing what it knew. Sprint 4 showed it still caused
+catastrophic forgetting when trained on one domain only.
+
+**Gates** = pre-set pass/fail thresholds in the verdict cell. Sprint 5: (1) PlantDoc F1 > 0.1116
+baseline, (2) PlantVillage F1 ≥ 0.855 (no forgetting). "DONE" only if both pass.
+
+**Mixed training** (`--mix-with plantdoc`) = PlantVillage + PlantDoc in the same epoch
+(`ConcatDataset`), so one shared head keeps both domains. `--plantdoc-repeat N` gives PlantDoc a bigger
+epoch share (~5% → ~28% at N=8). Two-head (domain-specialized) model = future-work idea in the plan:
+better per-domain scores, but needs to know the photo's domain at inference — not the thesis's
+single-model story.
+
+**Framework stack** — PyTorch + torchvision (model), Albumentations (aug), scikit-learn (metrics),
+pandas (CSV), FastAPI (backend), Next.js/React (frontend). **PyTorch vs TensorFlow:** both are DL
+frameworks (tensor math + autograd + layers + optimizers). PyTorch = Pythonic, research-standard,
+easy debugging → what we use. TensorFlow = production-oriented (TF Serving/TFLite). TF was only ever a
+menu option in the plan, never implemented — torchvision + Albumentations covered everything, so we
+use PyTorch end-to-end.
+
+**Vite vs Next.js (both are React)** — Vite = simplest SPA; Next = adds SSR/SEO/routing. SSR/SEO only
+pay off for public content sites (Google-crawled landing pages); a single-page upload tool gets zero
+benefit. We chose Next.js anyway for resume value (frontend only; FastAPI stays the backend because
+PyTorch is Python). Full product features (accounts, chat history, payments, mobile app) are deferred
+— the graded demo is one polished page.
+
 ### Key facts
 
 - **Epoch** = one full pass over all 43,429 PlantVillage training images; `ml/train.py` loops
