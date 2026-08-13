@@ -305,6 +305,47 @@ well-known failure mode, now documented with real numbers. The sprint gate ("did
 baseline on PlantDoc?") was met, but **no single model can serve both domains yet** — that motivated
 Sprint 5 (mixed training).
 
+### The ablation CSV — what every row means
+
+The paper's numbers all come from **one file**: `results/ablation_results.csv` (Drive:
+`folium/results/`). **One row = one evaluation run** — every time `ml/evaluate` scores a checkpoint on
+a test split it appends a row. Nothing is hand-typed; a number is only in the table if an actual run
+produced it.
+
+**Every column** (defined in `ABLATION_COLUMNS`, `ml/evaluate.py:36`):
+
+| column | meaning |
+|---|---|
+| `variant` | the experiment/model recipe name (e.g. `both`). Same variant + same checkpoint = same trained model. |
+| `dataset` | **which test set** that model was scored on: `plantvillage_test` (5,459 clean lab photos) or `plantdoc_test` (230 field photos, PlantDoc classes mapped onto the 38 PV labels). |
+| `split` | always `test` for ablation rows (train/val exist for debugging only). |
+| `backbone` | `mobilenet_v2` — the frozen feature extractor. |
+| `epochs` | the saved checkpoint's `epoch` field — the epoch that was **best on validation**, not how many were configured. |
+| `classes` | length of the checkpoint's `class_names` — always 38, because PlantDoc is mapped into the same PV label space. |
+| `test_images` | images actually scored (5,459 PV / 230 mapped PlantDoc — the 236 original minus 6 in classes that map nowhere). |
+| `accuracy` `precision` `recall` `f1` | macro metrics on that one run. |
+| `timestamp` | when the row was logged. |
+| `checkpoint` | the exact `.pt` file scored (identity column). |
+
+**Reading a row:** `pv_plus_plantdoc | plantdoc_test | ... f1 0.5090` = "the Stage-2 PlantDoc
+fine-tune scored F1 0.5090 on PlantDoc's field-photo test set."
+
+**Why multiple rows per variant:** each model is evaluated on **both** test sets, so every Sprint 4/5
+variant appears twice — once on `plantdoc_test` (did the gap close?) and once on `plantvillage_test`
+(did it forget?). What each pair means:
+
+| variant | `plantvillage_test` row | `plantdoc_test` row |
+|---|---|---|
+| `baseline_pv_only_no_aug` | in-domain lab score (the 0.9613 ceiling) | **the gap** — same model collapses on field photos (0.1435) |
+| `augmentation_only` | Sprint 3 check (0.9465) | *no row — Sprint 3 never scored PlantDoc* |
+| `pv_plus_plantdoc` | forgetting check (0.3744) | fine-tune on PlantDoc, no aug (0.5391) |
+| `both` | forgetting check (0.3805) | fine-tune on PlantDoc + aug (0.5739) |
+| `mixed` / `mixed_aug` (Sprint 5) | no-forgetting gate | PlantDoc gate |
+
+**Dedup rule:** re-running `ml/evaluate` on the same `variant + dataset + split + checkpoint` prints
+"Skipped duplicate" instead of appending — only the timestamp would differ. Genuinely new combinations
+are always added, so the table never bloats but never loses a result.
+
 ### The thesis in one line
 
 A model trained on clean lab photos (PlantVillage, 96% on its own test) underperforms on real-world
