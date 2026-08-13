@@ -386,6 +386,23 @@ fine-tuning.
 - **The gap number:** evaluate `best_plantvillage_stage1.pt` on `plantdoc_test --map-to-pv` → the
   baseline's field-photo score. The 4-way ablation CSV now gets `plantdoc_test` rows too.
 
+### The notebook steps: train vs evaluate vs verdict vs predict
+
+The sprint notebook does four different jobs — only ONE of them changes the model:
+
+| step | what it does | changes model? | produces |
+|---|---|---|---|
+| **train** (Step 5/7) | epoch loop — updates weights, saves a checkpoint each epoch + `best_*.pt` | **YES** | `.pt` files |
+| **evaluate** (Step 6/8) | loads a checkpoint, scores it on ONE test set | no | metrics + `cm_*.png` + one CSV row |
+| **verdict** (Step 9) | reads the CSV, compares all rows, checks the gate | no | printed comparison + "DONE"/"NOT met" |
+| **predict** (Step 10) | loads a checkpoint, classifies 2-3 individual images | no | top-3 labels per image |
+
+One line each: **train makes the model; evaluate measures one model on one test set; verdict compares
+all measurements; predict shows individual predictions you can eyeball.** Only train touches weights;
+only evaluate touches the CSV; verdict and predict are read-only. Evaluate scores 230/5,459 images at
+once (aggregate numbers for the paper); predict classifies a handful of images so you can see real
+predictions, not just averages.
+
 ### Gotchas found while building
 
 - `unfreeze_last_blocks` (fixed): MobileNetV2's `features` ends with a 1x1 conv, ReLU6,
@@ -444,6 +461,19 @@ already aligned via `class_map.json`, so each batch just mixes lab and field pho
 - Evaluation unchanged: `ml/evaluate.py` scores any checkpoint on either test set.
 - Caveat: PlantDoc is ~5% of each epoch (2,107 vs 43,429 images). If its signal is too weak we can
   oversample PlantDoc later.
+
+### The notebook steps (Sprint 5 numbering)
+
+Same four jobs as Sprint 4, different step numbers:
+
+| step | what it does | changes model? | produces |
+|---|---|---|---|
+| **train** (Step 4/6) | epoch loop on PlantVillage+PlantDoc (`--mix-with`), saves `best_plantvillage_mixed*.pt` | **YES** | `.pt` files |
+| **evaluate** (Step 5/7) | loads a checkpoint, scores it on ONE test set (plantdoc then plantvillage) | no | metrics + `cm_<variant>.png` + one CSV row each |
+| **verdict** (Step 8) | reads the CSV, checks the TWO gates (PlantDoc F1 up, no forgetting) | no | printed table + "DONE"/"NOT met" |
+| **predict** (Step 9) | classifies 2-3 field + 2-3 lab photos, prints top-3 labels | no | human sanity check |
+
+The evaluate steps produce the CSV rows; the verdict reads them back — it adds no numbers of its own.
 
 ### Quiz recap (Sprint 5)
 
