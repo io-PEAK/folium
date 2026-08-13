@@ -515,3 +515,37 @@ The evaluate steps produce the CSV rows; the verdict reads them back — it adds
    PlantVillage labels; `ConcatDataset` just concatenates the two datasets.
 4. What are the two success gates? → PlantDoc F1 beats the 0.1116 baseline AND PlantVillage F1 stays
    near 0.9501 (no forgetting).
+
+## Phase 5 - Sprint 6: Oversampling PlantDoc in Mixed Training (built & smoke-tested, awaiting the real run)
+
+**Learned in:** Sprint 6 build — repeating the PlantDoc train set inside the mixed loader so the
+shared head spends more of each epoch on field photos.
+
+### The problem it solves
+
+Sprint 5's `mixed` kept both domains (PV 0.9592 / PD 0.4107 F1) but PlantDoc lagged the pure
+fine-tune (`both` 0.5578), because PlantDoc is only ~5% of each mixed epoch (2,107 vs 43,429 images).
+Sprint 6 repeats the PlantDoc train set N times (`--plantdoc-repeat 8` → ~28% of every epoch) to chase
+the field number without giving up the lab.
+
+### Variant
+
+- **v7 `mixed_upsampled`**: same as `mixed` + `--plantdoc-repeat 8` → `best_plantvillage_mixed_upsampled.pt`.
+- No augmentation variant: aug has hurt field scores twice (`mixed_aug` < `mixed`, Sprint 3 aug < baseline).
+
+### How it's implemented
+
+- `build_loaders(..., plantdoc_repeat=N)` (`ml/data_loading.py`): in the `mix_with` branch, the mapped
+  PlantDoc train dataset is repeated N times in the `ConcatDataset`
+  (`[pv] + [pd_train] * plantdoc_repeat`); val/test unchanged.
+- `ml/train.py --plantdoc-repeat N`: forwards the flag (default 1); header shows
+  `plantvillage+plantdoc x8 (60285 train images, 38 classes)`.
+
+### Quiz recap (Sprint 6)
+
+1. Why was `mixed`'s PlantDoc F1 (0.4107) below `both`'s (0.5578)? → PlantDoc is ~5% of each mixed
+   epoch; `both` spent 100% of its time on PlantDoc.
+2. What does `--plantdoc-repeat 8` change? → PlantDoc appears 8× per epoch (~28% of batches), so the
+   head sees field photos far more without dropping the lab set.
+3. Why not just train on PlantDoc only? → that's `both`: great field (0.5578) but catastrophic
+   forgetting (PlantVillage 0.3168).

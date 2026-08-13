@@ -138,6 +138,7 @@ def build_loaders(
     augment: bool = False,
     map_to_pv: bool = False,
     mix_with: str | None = None,
+    plantdoc_repeat: int = 1,
 ) -> tuple[DataLoader, DataLoader, DataLoader, list[str]]:
     """Build train/val/test DataLoaders (ImageFolder) for one dataset.
 
@@ -158,6 +159,11 @@ def build_loaders(
     (and the two val sets), both already in the shared 38-class PlantVillage label
     space. The fix for the Sprint 4 catastrophic forgetting: every epoch sees both
     domains, so the head keeps lab knowledge while learning field photos.
+
+    ``plantdoc_repeat`` (Sprint 6): in mixed training, repeat the PlantDoc train
+    set N times inside the ConcatDataset so field photos get a bigger share of
+    every epoch (PlantDoc is naturally only ~5%; ``repeat=8`` -> ~28%). The lever
+    for chasing the fine-tune-only field score without dropping the lab.
     """
     root = Path(data_dir) / dataset
 
@@ -167,6 +173,8 @@ def build_loaders(
                 f"mix_with only supports dataset='plantvillage' + mix_with='plantdoc', "
                 f"got '{dataset}' + '{mix_with}'"
             )
+        if plantdoc_repeat < 1:
+            raise ValueError(f"plantdoc_repeat must be >= 1, got {plantdoc_repeat}")
         pv_root = Path(data_dir) / "plantvillage"
         pd_root = Path(data_dir) / mix_with
         class_map = _load_class_map(Path(data_dir))
@@ -177,11 +185,10 @@ def build_loaders(
             pv_names,
             transform=make_transforms(augment=aug),
         )
+        pd_train = make_mapped("train", augment)
         train_ds = torch.utils.data.ConcatDataset(
-            [
-                datasets.ImageFolder(pv_root / "train", transform=make_transforms(augment=augment)),
-                make_mapped("train", augment),
-            ]
+            [datasets.ImageFolder(pv_root / "train", transform=make_transforms(augment=augment))]
+            + [pd_train] * plantdoc_repeat
         )
         val_ds = torch.utils.data.ConcatDataset(
             [

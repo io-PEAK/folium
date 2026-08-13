@@ -7,7 +7,8 @@ from a Stage 1 checkpoint (--init-from), unfreezes the last backbone blocks
 optionally on PlantDoc mapped into the PlantVillage label space (--map-to-pv).
 Sprint 5: --mix-with plantdoc trains PlantVillage + PlantDoc together in every
 epoch (concatenated loaders), so the model keeps both domains instead of
-forgetting PlantVillage.
+forgetting PlantVillage. Sprint 6: --plantdoc-repeat N repeats the PlantDoc
+train set inside the mixed loader to give field photos a bigger epoch share.
 
 Uses Adam + mixed precision on CUDA, saves a checkpoint every epoch plus a
 best-on-validation copy so a dropped Colab session never loses everything.
@@ -70,6 +71,10 @@ def parse_args() -> argparse.Namespace:
                              "epoch (mix_with='plantdoc' = PlantVillage + PlantDoc concatenated into "
                              "one loader; the fix for catastrophic forgetting). Requires "
                              "dataset='plantvillage'.")
+    parser.add_argument("--plantdoc-repeat", type=int, default=1,
+                        help="Sprint 6: repeat the PlantDoc train set N times inside the mixed "
+                             "loader so field photos get a bigger share of every epoch (PlantDoc is "
+                             "naturally ~5 percent; e.g. 8 -> ~28 percent). Only used with --mix-with plantdoc.")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
     return parser.parse_args()
@@ -186,6 +191,7 @@ def main() -> None:
         augment=args.augment,
         map_to_pv=args.map_to_pv,
         mix_with=args.mix_with,
+        plantdoc_repeat=args.plantdoc_repeat,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": "mobilenet_v2", "pretrained": True, "freeze": True}
     model = build_model(**model_kwargs).to(device)
@@ -234,6 +240,8 @@ def main() -> None:
 
     mode = "fine-tuning" if args.unfreeze_blocks > 0 else "head-only"
     dataset_label = f"{args.dataset}+{args.mix_with}" if args.mix_with else args.dataset
+    if args.mix_with and args.plantdoc_repeat > 1:
+        dataset_label = f"{dataset_label} x{args.plantdoc_repeat}"
     print(f"Training {mode} on {dataset_label} ({len(train_loader.dataset)} train images, "
           f"{len(class_names)} classes), {args.epochs} epochs, "
           f"lr={args.lr}, head_lr={args.head_lr or args.lr}, "
