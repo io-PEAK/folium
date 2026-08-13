@@ -276,9 +276,34 @@ skipped instead of spamming duplicate rows.
 - **Q: Why percent-normalize the matrix?** A: Class imbalance — raw counts make small classes look clean
   and big-class errors invisible; percentages make all 38 classes comparable.
 
-## Phase 3 - Sprint 4: PlantDoc Fine-Tuning & the Real-World Gap (built & smoke-tested, awaiting the real run)
+## Phase 3 - Sprint 4: PlantDoc Fine-Tuning & the Real-World Gap (✅ done, 2026-08-13)
 
-**Learned in:** Sprint 4 build — cross-dataset evaluation, Stage 2 fine-tuning, and the gap story.
+**Learned in:** Sprint 4 build + real run — cross-dataset evaluation, Stage 2 fine-tuning, the gap story,
+and catastrophic forgetting.
+
+### Sprint 4 result (real run)
+
+| variant | dataset | accuracy | precision | recall | f1 |
+|---|---|---|---|---|---|
+| baseline_pv_only_no_aug | plantvillage_test | 0.9613 | 0.9482 | 0.9561 | 0.9501 |
+| baseline_pv_only_no_aug | plantdoc_test | **0.1435** | 0.1885 | 0.1161 | **0.1116** |
+| pv_plus_plantdoc | plantdoc_test | 0.5391 | 0.5559 | 0.5311 | 0.5090 |
+| pv_plus_plantdoc | plantvillage_test | 0.3744 | 0.4438 | 0.3822 | 0.3116 |
+| both | plantdoc_test | 0.5739 | 0.6071 | 0.5769 | 0.5578 |
+| both | plantvillage_test | 0.3805 | 0.4233 | 0.4080 | 0.3168 |
+
+**Finding 1 — the real-world gap is real and huge.** The baseline that scores 0.9613/0.9501 on clean
+PlantVillage lab photos collapses to **0.1435 / 0.1116** on PlantDoc field photos (same 38-class label
+space via `--map-to-pv`, 230 mapped test images). F1 drop **−0.839**. This is the thesis headline, now
+measured from a real run.
+
+**Finding 2 — catastrophic forgetting is confirmed.** Stage 2 fine-tuning closed most of the PlantDoc
+gap (F1 0.1116 → **0.5090** for `pv_plus_plantdoc`, → **0.5578** for `both`), but both fine-tuned models
+collapsed on PlantVillage test: F1 **0.9501 → 0.3116** (`pv_plus_plantdoc`) / **0.3168** (`both`).
+Training on only 2,107 PlantDoc photos for 10 epochs overwrote the lab-domain knowledge — a classic,
+well-known failure mode, now documented with real numbers. The sprint gate ("did fine-tuning beat the
+baseline on PlantDoc?") was met, but **no single model can serve both domains yet** — that motivated
+Sprint 5 (mixed training).
 
 ### The thesis in one line
 
@@ -328,5 +353,46 @@ fine-tuning.
   evaluation — same model, same label space, photos from a different, harder source (PlantDoc field
   shots vs PlantVillage lab shots). The drop quantifies the gap.
 - **Q: Why fine-tune instead of retraining?** A: Warm-starting preserves what the model learned about
-  diseases in the lab; a small-LR, partial unfreeze adapts to field-photo conditions without forgetting
-  the lab data (checked by re-scoring on PlantVillage test).
+  diseases in the lab; a small-LR, partial unfreeze adapts to field-photo conditions. Caution — our
+  Sprint 4 run proved this is NOT forgetting-free: fine-tuning on PlantDoc alone dropped PlantVillage F1
+  from 0.95 to 0.31 (catastrophic forgetting). That's exactly why Sprint 5 trains on both datasets
+  together.
+
+## Phase 4 - Sprint 5: Mixed-Domain Training (built & smoke-tested, awaiting the real run)
+
+**Learned in:** Sprint 5 build — training on PlantVillage + PlantDoc together so the model keeps both
+domains (the fix for the Sprint 4 forgetting).
+
+### The problem it solves
+
+Sprint 4 fine-tuned on PlantDoc only and forgot PlantVillage (F1 0.95 → 0.31). Sprint 5 trains on
+**both datasets in the same epoch** (`torch.utils.data.ConcatDataset`): the 38-class label space is
+already aligned via `class_map.json`, so each batch just mixes lab and field photos.
+
+### Variants
+
+- **v5 `mixed`**: `--init-from best_plantvillage_stage1.pt --mix-with plantdoc --tag mixed` (no aug)
+  → `best_plantvillage_mixed.pt`.
+- **v6 `mixed_aug`**: same + `--augment` → `best_plantvillage_mixed_aug.pt`.
+
+### How it's implemented
+
+- `build_loaders(..., mix_with="plantdoc")` (`ml/data_loading.py`): builds the PlantVillage train/val
+  datasets *and* the mapped PlantDoc train/val datasets, then concatenates them into one train loader
+  and one val loader. `class_names` = PlantVillage's 38 classes (shared head).
+- `ml/train.py --mix-with plantdoc`: forwards the flag; the epoch loop, optimizer and best-val
+  checkpoint logic are unchanged. Checkpoint files keep the `best_plantvillage_<tag>.pt` scheme.
+- Evaluation unchanged: `ml/evaluate.py` scores any checkpoint on either test set.
+- Caveat: PlantDoc is ~5% of each epoch (2,107 vs 43,429 images). If its signal is too weak we can
+  oversample PlantDoc later.
+
+### Quiz recap (Sprint 5)
+
+1. Why did Sprint 4 forget PlantVillage? → it trained on PlantDoc only (2,107 images, 10 epochs) and
+   overwrote the lab-domain head.
+2. How does mixed training fix it? → every epoch sees both datasets, so the head keeps lab knowledge
+   while learning field photos.
+3. How do two datasets share one 38-class head? → `--map-to-pv` translates PlantDoc folders to
+   PlantVillage labels; `ConcatDataset` just concatenates the two datasets.
+4. What are the two success gates? → PlantDoc F1 beats the 0.1116 baseline AND PlantVillage F1 stays
+   near 0.9501 (no forgetting).

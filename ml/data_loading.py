@@ -137,6 +137,7 @@ def build_loaders(
     pin_memory: bool = True,
     augment: bool = False,
     map_to_pv: bool = False,
+    mix_with: str | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, list[str]]:
     """Build train/val/test DataLoaders (ImageFolder) for one dataset.
 
@@ -151,10 +152,46 @@ def build_loaders(
     head stays compatible). Only the `plantvillage` folder layout can provide the
     authoritative class list, so this requires the PlantVillage data to be
     organized too.
+
+    ``mix_with="plantdoc"`` (Sprint 5): train on PlantVillage (``dataset``) AND
+    PlantDoc together — ``torch.utils.data.ConcatDataset`` of the two train sets
+    (and the two val sets), both already in the shared 38-class PlantVillage label
+    space. The fix for the Sprint 4 catastrophic forgetting: every epoch sees both
+    domains, so the head keeps lab knowledge while learning field photos.
     """
     root = Path(data_dir) / dataset
 
-    if map_to_pv:
+    if mix_with is not None:
+        if dataset != "plantvillage" or mix_with != "plantdoc":
+            raise ValueError(
+                f"mix_with only supports dataset='plantvillage' + mix_with='plantdoc', "
+                f"got '{dataset}' + '{mix_with}'"
+            )
+        pv_root = Path(data_dir) / "plantvillage"
+        pd_root = Path(data_dir) / mix_with
+        class_map = _load_class_map(Path(data_dir))
+        pv_names = datasets.ImageFolder(str(pv_root / "train")).classes
+        make_mapped = lambda split, aug: _MappedImageFolder(
+            pd_root / split,
+            class_map,
+            pv_names,
+            transform=make_transforms(augment=aug),
+        )
+        train_ds = torch.utils.data.ConcatDataset(
+            [
+                datasets.ImageFolder(pv_root / "train", transform=make_transforms(augment=augment)),
+                make_mapped("train", augment),
+            ]
+        )
+        val_ds = torch.utils.data.ConcatDataset(
+            [
+                datasets.ImageFolder(pv_root / "val", transform=make_transforms()),
+                make_mapped("val", False),
+            ]
+        )
+        test_ds = datasets.ImageFolder(pv_root / "test", transform=make_transforms())
+        class_names = pv_names
+    elif map_to_pv:
         if dataset != "plantdoc":
             raise ValueError(f"map_to_pv only makes sense for dataset='plantdoc', got '{dataset}'")
         class_map = _load_class_map(Path(data_dir))

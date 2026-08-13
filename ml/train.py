@@ -5,6 +5,9 @@ classification head, optionally with augmentation. Stage 2 (Sprint 4): warm-star
 from a Stage 1 checkpoint (--init-from), unfreezes the last backbone blocks
 (--unfreeze-blocks) and fine-tunes at a low --lr with the head at --head-lr,
 optionally on PlantDoc mapped into the PlantVillage label space (--map-to-pv).
+Sprint 5: --mix-with plantdoc trains PlantVillage + PlantDoc together in every
+epoch (concatenated loaders), so the model keeps both domains instead of
+forgetting PlantVillage.
 
 Uses Adam + mixed precision on CUDA, saves a checkpoint every epoch plus a
 best-on-validation copy so a dropped Colab session never loses everything.
@@ -62,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--map-to-pv", action="store_true",
                         help="dataset='plantdoc': read PlantDoc but translate its classes to the "
                              "PlantVillage label space via class_map.json (Sprint 4 cross-dataset use)")
+    parser.add_argument("--mix-with", default=None,
+                        help="Sprint 5: train --dataset together with this second dataset in every "
+                             "epoch (mix_with='plantdoc' = PlantVillage + PlantDoc concatenated into "
+                             "one loader; the fix for catastrophic forgetting). Requires "
+                             "dataset='plantvillage'.")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
     return parser.parse_args()
@@ -177,6 +185,7 @@ def main() -> None:
         seed=args.seed,
         augment=args.augment,
         map_to_pv=args.map_to_pv,
+        mix_with=args.mix_with,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": "mobilenet_v2", "pretrained": True, "freeze": True}
     model = build_model(**model_kwargs).to(device)
@@ -224,7 +233,9 @@ def main() -> None:
         print(f"Resumed from {args.resume} at epoch {ckpt['epoch']} (best val acc {best_val_acc:.4f})")
 
     mode = "fine-tuning" if args.unfreeze_blocks > 0 else "head-only"
-    print(f"Training {mode} on {len(class_names)} classes, {args.epochs} epochs, "
+    dataset_label = f"{args.dataset}+{args.mix_with}" if args.mix_with else args.dataset
+    print(f"Training {mode} on {dataset_label} ({len(train_loader.dataset)} train images, "
+          f"{len(class_names)} classes), {args.epochs} epochs, "
           f"lr={args.lr}, head_lr={args.head_lr or args.lr}, "
           f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
