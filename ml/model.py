@@ -56,14 +56,20 @@ def build_model(
 
 
 def unfreeze_last_blocks(model: nn.Module, n_blocks: int) -> None:
-    """Re-enable gradients on the last ``n_blocks`` of the backbone.
+    """Re-enable gradients on the last ``n_blocks`` *parameter-bearing* backbone modules.
 
     Stage 2 fine-tuning trains only these blocks (at a much lower LR) plus the
     head, leaving early layers intact to avoid catastrophic forgetting.
+
+    We filter to modules that actually own parameters: torchvision's MobileNetV2
+    ``features`` ends with a 1x1 conv, ReLU6, AdaptiveAvgPool2d and Flatten, so a
+    naive ``features[-n:]`` could unfreeze pooling/flatten (zero trainable params)
+    and silently do nothing.
     """
     if n_blocks <= 0:
         return
-    for module in model.features[-n_blocks:]:
+    trainable_modules = [m for m in model.features if len(list(m.parameters())) > 0]
+    for module in trainable_modules[-n_blocks:]:
         for param in module.parameters():
             param.requires_grad = True
 

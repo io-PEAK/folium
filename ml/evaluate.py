@@ -59,6 +59,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, required=True, help="root holding <dataset>/{train,val,test}")
     parser.add_argument("--dataset", default="plantvillage", help="dataset subfolder under --data-dir")
     parser.add_argument("--split", default="test", choices=("train", "val", "test"), help="split to evaluate on")
+    parser.add_argument("--map-to-pv", action="store_true",
+                        help="dataset='plantdoc': translate PlantDoc classes to the PlantVillage label "
+                             "space via class_map.json so a 38-class model can be scored on PlantDoc "
+                             "photos (the Sprint 4 cross-dataset gap measurement)")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
@@ -200,6 +204,7 @@ def main() -> None:
         dataset=args.dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        map_to_pv=args.map_to_pv,
     )
     loader = {"train": train_loader, "val": val_loader, "test": test_loader}[args.split]
 

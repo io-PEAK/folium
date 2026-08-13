@@ -13,10 +13,12 @@ Data is expected in the layout produced by scripts/organize_datasets.py:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
@@ -87,6 +89,45 @@ def _worker_init_fn(worker_id: int) -> None:
     torch.manual_seed(42 + worker_id)
 
 
+class _MappedImageFolder:
+    """ImageFolder whose folder names are translated to PlantVillage class indices.
+
+    Used for cross-dataset evaluation / fine-tuning: PlantDoc folders are renamed
+    to their aligned PlantVillage class via ``class_map.json``, so a 38-class
+    PlantVillage model can be trained and scored on PlantDoc images. Samples whose
+    folder is not in the map are dropped.
+    """
+
+    def __init__(self, root: Path, class_map: dict, pv_names: list[str], transform=None):
+        inner = datasets.ImageFolder(str(root))
+        pv_index = {name: i for i, name in enumerate(pv_names)}
+        self.samples = [
+            (path, pv_index[class_map[inner.classes[cls]]])
+            for (path, cls) in inner.samples
+            if inner.classes[cls] in class_map and class_map[inner.classes[cls]] in pv_index
+        ]
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, i: int):
+        path, label = self.samples[i]
+        image = Image.open(path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
+
+
+def _load_class_map(data_dir: Path) -> dict:
+    path = data_dir / "class_map.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Run scripts/organize_datasets.py (it writes class_map.json)."
+        )
+    return json.loads(path.read_text())["plantdoc_to_plantvillage"]
+
+
 def build_loaders(
     data_dir: str,
     dataset: str = "plantvillage",
@@ -95,6 +136,7 @@ def build_loaders(
     seed: int = 42,
     pin_memory: bool = True,
     augment: bool = False,
+    map_to_pv: bool = False,
 ) -> tuple[DataLoader, DataLoader, DataLoader, list[str]]:
     """Build train/val/test DataLoaders (ImageFolder) for one dataset.
 
@@ -102,12 +144,34 @@ def build_loaders(
     maps model output index -> class folder name; it is what gets saved in
     checkpoints so evaluate/predict can label predictions. Augmentation is
     applied to the training loader only.
+
+    ``map_to_pv=True`` (Sprint 4): read PlantDoc under ``dataset`` but translate
+    its class folders to PlantVillage classes via class_map.json, and return the
+    full sorted PlantVillage class list as ``class_names`` (so the 38-class model
+    head stays compatible). Only the `plantvillage` folder layout can provide the
+    authoritative class list, so this requires the PlantVillage data to be
+    organized too.
     """
     root = Path(data_dir) / dataset
 
-    train_ds = datasets.ImageFolder(root / "train", transform=make_transforms(augment=augment))
-    val_ds = datasets.ImageFolder(root / "val", transform=make_transforms())
-    test_ds = datasets.ImageFolder(root / "test", transform=make_transforms())
+    if map_to_pv:
+        if dataset != "plantdoc":
+            raise ValueError(f"map_to_pv only makes sense for dataset='plantdoc', got '{dataset}'")
+        class_map = _load_class_map(Path(data_dir))
+        pv_names = datasets.ImageFolder(str(Path(data_dir) / "plantvillage" / "train")).classes
+        make_ds = lambda split: _MappedImageFolder(
+            root / split,
+            class_map,
+            pv_names,
+            transform=make_transforms(augment=augment and split == "train"),
+        )
+        train_ds, val_ds, test_ds = make_ds("train"), make_ds("val"), make_ds("test")
+        class_names = pv_names
+    else:
+        train_ds = datasets.ImageFolder(root / "train", transform=make_transforms(augment=augment))
+        val_ds = datasets.ImageFolder(root / "val", transform=make_transforms())
+        test_ds = datasets.ImageFolder(root / "test", transform=make_transforms())
+        class_names = train_ds.classes
 
     generator = torch.Generator()
     generator.manual_seed(seed)
@@ -123,4 +187,4 @@ def build_loaders(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **common)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **common)
 
-    return train_loader, val_loader, test_loader, train_ds.classes
+    return train_loader, val_loader, test_loader, class_names
