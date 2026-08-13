@@ -14,6 +14,24 @@ freeze it, and only train a small new output layer on our 38 disease classes. Af
 the data (epochs) we check how well it works on images it never trained on, using a confusion matrix,
 F1, and related metrics. Class imbalance means we report macro averages so every disease counts equally.
 
+### Type of learning and algorithm (one-liner)
+
+**Supervised multiclass image classification, done with transfer learning** — MobileNetV2 (a CNN)
+pretrained on ImageNet as the frozen feature extractor, a new linear head `Linear(1280, 38)` trained on
+top, then selective fine-tuning in Stage 2. Trained with Adam + `CrossEntropyLoss`, mixed precision on
+GPU, deterministic seed 42.
+
+- **Learning type:** supervised — every photo has a ground-truth class; multiclass — one of 38 labels.
+- **Backbone algorithm:** MobileNetV2 CNN (`torchvision.models.mobilenet_v2`, ImageNet-pretrained) →
+  1,280-dim feature vector.
+- **Head:** `nn.Sequential(nn.Dropout(0.1), nn.Linear(1280, 38))` — the only trainable part in Stage 1.
+- **Stage 1 recipe:** frozen backbone + Adam lr 1e-3 + `CrossEntropyLoss`, batch 32, head-only.
+- **Stage 2 (Sprint 4/5):** partial fine-tune — last 2 backbone blocks unfrozen at lr 1e-4, head at
+  lr 1e-3, warm-started from the Stage 1 checkpoint.
+- **Evaluation:** accuracy + macro precision/recall/F1 + row-normalized confusion matrix.
+- **Extras:** Albumentations augmentation (train only), `--map-to-pv`/`--mix-with` for cross-dataset
+  label alignment.
+
 ### Key facts
 
 - **Epoch** = one full pass over all 43,429 PlantVillage training images; `ml/train.py` loops
