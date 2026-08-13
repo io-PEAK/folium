@@ -434,10 +434,39 @@ predictions, not just averages.
   from 0.95 to 0.31 (catastrophic forgetting). That's exactly why Sprint 5 trains on both datasets
   together.
 
-## Phase 4 - Sprint 5: Mixed-Domain Training (built & smoke-tested, awaiting the real run)
+## Phase 4 - Sprint 5: Mixed-Domain Training (✅ done, 2026-08-13)
 
-**Learned in:** Sprint 5 build — training on PlantVillage + PlantDoc together so the model keeps both
-domains (the fix for the Sprint 4 forgetting).
+**Learned in:** Sprint 5 build + real run — training on PlantVillage + PlantDoc together so the model
+keeps both domains (the fix for the Sprint 4 forgetting).
+
+### Sprint 5 result (real run)
+
+| variant | dataset | accuracy | precision | recall | f1 |
+|---|---|---|---|---|---|
+| **mixed** | plantdoc_test | 0.4478 | 0.4160 | 0.4284 | 0.4107 |
+| **mixed** | plantvillage_test | **0.9687** | 0.9565 | 0.9633 | **0.9592** |
+| mixed_aug | plantdoc_test | 0.4174 | 0.3786 | 0.3354 | 0.3264 |
+| mixed_aug | plantvillage_test | 0.9460 | 0.9376 | 0.9360 | 0.9355 |
+
+**Finding 3 — mixed training fixes the forgetting, and then some.** Both gates passed: PlantVillage F1
+**0.9592** (`mixed`) is even *higher* than the 0.9501 baseline, and PlantDoc F1 **0.4107** beats the
+0.1116 field baseline ~3.7×. Training on both datasets every epoch keeps the lab AND learns the field.
+
+**But it's a trade-off, not a free lunch.** Mixed gained less on PlantDoc than pure fine-tuning did,
+because PlantDoc is only ~5% of each mixed epoch:
+
+| model (all real runs) | PlantVillage F1 | PlantDoc F1 |
+|---|---|---|
+| baseline (PV only) | 0.9501 | 0.1116 |
+| pv_plus_plantdoc (PD fine-tune) | 0.3116 | 0.5090 |
+| both (PD fine-tune + aug) | 0.3168 | 0.5578 |
+| **mixed (PV+PD together)** | **0.9592** | 0.4107 |
+| mixed_aug | 0.9355 | 0.3264 |
+
+No single model wins both columns yet: the fine-tunes own field photos (`both` 0.5578) but forget the
+lab; `mixed` owns the lab and is the only one usable on both domains. Next lever: oversample PlantDoc
+so it gets a bigger share of each mixed epoch — chase `both`'s PlantDoc number without losing
+PlantVillage.
 
 ### The problem it solves
 
@@ -459,8 +488,9 @@ already aligned via `class_map.json`, so each batch just mixes lab and field pho
 - `ml/train.py --mix-with plantdoc`: forwards the flag; the epoch loop, optimizer and best-val
   checkpoint logic are unchanged. Checkpoint files keep the `best_plantvillage_<tag>.pt` scheme.
 - Evaluation unchanged: `ml/evaluate.py` scores any checkpoint on either test set.
-- Caveat: PlantDoc is ~5% of each epoch (2,107 vs 43,429 images). If its signal is too weak we can
-  oversample PlantDoc later.
+- Caveat: PlantDoc is ~5% of each epoch (2,107 vs 43,429 images). The run confirmed the concern —
+  `mixed` got PlantDoc F1 0.4107 vs the pure fine-tune's 0.5578. Fix if we chase the field number:
+  oversample PlantDoc inside the mixed loader.
 
 ### The notebook steps (Sprint 5 numbering)
 
