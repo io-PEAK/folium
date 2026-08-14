@@ -1,7 +1,9 @@
 """Model definitions and freeze/unfreeze helpers (see AGENT.md -> ml/model.py).
 
 Primary backbone is MobileNetV2 pretrained on ImageNet; EfficientNet-B0 is
-available as the comparison baseline the paper needs (Sprint 4).
+available as the comparison baseline the paper needs (Sprint 4). Sprint 7 adds
+ResNet-50 (and keeps EfficientNet-B0) to push the field-photo ceiling toward
+0.60+ F1, since MobileNetV2's best field score so far is `both`'s 0.5578.
 
 Sprint 1 (Stage 1): base is frozen, only the new classification head trains.
 """
@@ -16,6 +18,7 @@ from torchvision import models
 MODEL_FEATURE_DIMS = {
     "mobilenet_v2": 1280,
     "efficientnet_b0": 1280,
+    "resnet50": 2048,
 }
 
 
@@ -23,6 +26,7 @@ def _pretrained_weights(backbone: str):
     return {
         "mobilenet_v2": models.MobileNet_V2_Weights.IMAGENET1K_V1,
         "efficientnet_b0": models.EfficientNet_B0_Weights.IMAGENET1K_V1,
+        "resnet50": models.ResNet50_Weights.IMAGENET1K_V1,
     }[backbone]
 
 
@@ -51,8 +55,37 @@ def build_model(
             param.requires_grad = False
 
     in_features = MODEL_FEATURE_DIMS[backbone]
-    model.classifier = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
+    head = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
+    if "resnet" in backbone:
+        model.fc = head
+    else:
+        model.classifier = head
     return model
+
+
+def head_module(model: nn.Module) -> nn.Module:
+    """Return the classification module whose parameters train as the 'head'.
+
+    torchvision ResNets call it ``fc``; MobileNet/EfficientNet call it
+    ``classifier``. Both are the final Sequential(Dropout, Linear) tail.
+    """
+    if "resnet" in type(model).__name__.lower():
+        return model.fc
+    return model.classifier
+
+
+def _feature_modules(model: nn.Module) -> list[nn.Module]:
+    """The backbone's sequential feature modules (for unfreeze-by-position).
+
+    MobileNetV2 / EfficientNet expose ``features``; ResNets expose
+    ``conv1..layer4`` as named children.
+    """
+    name = type(model).__name__.lower()
+    if name in ("mobilenetv2", "efficientnet"):
+        return list(model.features)
+    if "resnet" in name:
+        return [model.conv1, model.bn1, model.maxpool, model.layer1, model.layer2, model.layer3, model.layer4]
+    raise ValueError(f"Unsupported backbone type '{name}'")
 
 
 def unfreeze_last_blocks(model: nn.Module, n_blocks: int) -> None:
@@ -64,11 +97,11 @@ def unfreeze_last_blocks(model: nn.Module, n_blocks: int) -> None:
     We filter to modules that actually own parameters: torchvision's MobileNetV2
     ``features`` ends with a 1x1 conv, ReLU6, AdaptiveAvgPool2d and Flatten, so a
     naive ``features[-n:]`` could unfreeze pooling/flatten (zero trainable params)
-    and silently do nothing.
+    and silently do nothing. Same filtering applies to ResNet (skips ``maxpool``).
     """
     if n_blocks <= 0:
         return
-    trainable_modules = [m for m in model.features if len(list(m.parameters())) > 0]
+    trainable_modules = [m for m in _feature_modules(model) if len(list(m.parameters())) > 0]
     for module in trainable_modules[-n_blocks:]:
         for param in module.parameters():
             param.requires_grad = True

@@ -9,6 +9,11 @@ Sprint 5: --mix-with plantdoc trains PlantVillage + PlantDoc together in every
 epoch (concatenated loaders), so the model keeps both domains instead of
 forgetting PlantVillage. Sprint 6: --plantdoc-repeat N repeats the PlantDoc
 train set inside the mixed loader to give field photos a bigger epoch share.
+Sprint 7 (the backbone sweep): --backbone resnet50/efficientnet_b0 runs the same
+Sprint 4 + fine-tune-then-mix recipes on stronger feature extractors to push the
+field-photo F1 past MobileNetV2's 0.5578 ceiling toward 0.60+, keeping a single
+self-contained model (v13 warm-starts from the field-strong Stage-2 checkpoint
+via --init-from, then --mix-with plantdoc re-learns the lab).
 
 Uses Adam + mixed precision on CUDA, saves a checkpoint every epoch plus a
 best-on-validation copy so a dropped Colab session never loses everything.
@@ -33,7 +38,7 @@ from torch import nn
 from tqdm import tqdm
 
 from .data_loading import build_loaders
-from .model import build_model, unfreeze_last_blocks
+from .model import MODEL_FEATURE_DIMS, build_model, head_module, unfreeze_last_blocks
 
 DEFAULT_SEED = 42
 
@@ -45,6 +50,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", type=Path, required=True, help="root holding <dataset>/{train,val,test}")
     parser.add_argument("--dataset", default="plantvillage", help="dataset subfolder under --data-dir")
+    parser.add_argument("--backbone", default="mobilenet_v2", choices=sorted(MODEL_FEATURE_DIMS),
+                        help="feature extractor; Sprint 7 sweep uses resnet50/efficientnet_b0 to push "
+                             "the field-photo F1 ceiling past MobileNetV2's 0.5578")
     parser.add_argument("--epochs", type=int, default=5, help="number of epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="training/validation batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Adam learning rate (backbone params; head uses --head-lr if set)")
@@ -193,7 +201,7 @@ def main() -> None:
         mix_with=args.mix_with,
         plantdoc_repeat=args.plantdoc_repeat,
     )
-    model_kwargs = {"num_classes": len(class_names), "backbone": "mobilenet_v2", "pretrained": True, "freeze": True}
+    model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True, "freeze": True}
     model = build_model(**model_kwargs).to(device)
 
     if args.init_from is not None:
@@ -211,7 +219,7 @@ def main() -> None:
         print(f"Unfroze last {args.unfreeze_blocks} parameter-bearing backbone modules", flush=True)
 
     criterion = nn.CrossEntropyLoss()
-    head_params = list(model.classifier.parameters())
+    head_params = list(head_module(model).parameters())
     backbone_params = [
         p for p in model.parameters()
         if p.requires_grad and all(id(p) != id(h) for h in head_params)
@@ -244,7 +252,7 @@ def main() -> None:
         dataset_label = f"{dataset_label} x{args.plantdoc_repeat}"
     print(f"Training {mode} on {dataset_label} ({len(train_loader.dataset)} train images, "
           f"{len(class_names)} classes), {args.epochs} epochs, "
-          f"lr={args.lr}, head_lr={args.head_lr or args.lr}, "
+          f"backbone={args.backbone}, lr={args.lr}, head_lr={args.head_lr or args.lr}, "
           f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device)

@@ -610,3 +610,118 @@ the field number without giving up the lab.
    head sees field photos far more without dropping the lab set.
 3. Why not just train on PlantDoc only? → that's `both`: great field (0.5578) but catastrophic
    forgetting (PlantVillage 0.3168).
+
+## Phase 6 - Sprint 7: stronger backbones for the field ceiling (built, awaiting the real run)
+
+**Learned in:** Sprint 7 build — two things came together. First, MobileNetV2 is the bottleneck, not
+the recipe: its best field score is `both`'s 0.5578 and every sprint since (5/6) moved within
+0.41-0.56. Second, the "fine-tune, then mix" idea (warm-start from the field-strong checkpoint) is
+the right way to build ONE self-contained model. So Sprint 7 runs that idea on stronger feature
+extractors, which is what can actually clear the app-grade field target (>= 0.60).
+
+### Where Sprint 6 left us (real run, 2026-08-14)
+
+| model | PlantVillage F1 | PlantDoc F1 |
+|---|---|---|
+| baseline (PV only) | 0.9501 | 0.1116 |
+| both (PD fine-tune) | 0.3168 | 0.5578 |
+| mixed | 0.9592 | 0.4107 |
+| **mixed_upsampled** (repeat 8) | **0.9362** | **0.4122** |
+
+Oversampling PlantDoc 8x barely moved the field score (+0.0015, noise) and cost lab (-0.023). Lesson:
+the field bottleneck is NOT epoch share — `both` proved the head can hit 0.5578 when it spends all
+its time on field photos. The bottleneck is MobileNetV2 itself plus the one-shared-head balancing
+problem. The PlantDoc paper reported ~0.70 accuracy with ResNet-50 on its native classes/split.
+
+### The honest ceiling (why 0.60 is plausible, 0.70 is aspirational)
+
+- The PlantDoc test set is only ~230 mapped images: F1 swings of +/-0.03-0.05 are noise (mixed 0.4107
+  vs mixed_upsampled 0.4122 was exactly that). A 0.60+ number is a real jump, not luck.
+- ResNet-50 (25.6M params) and EfficientNet-B0 (5.3M) both beat MobileNetV2 (3.5M) on ImageNet; on
+  2,107 field images that capacity buys better robustness to the background clutter/lighting PlantDoc
+  photos have.
+- Caps that stay regardless of backbone: PlantDoc's crowd-sourced label noise (some photos are simply
+  mislabeled), the small test set, and the mapping onto PlantVillage classes. Label cleaning and more
+  real photos are the levers beyond the backbone.
+
+### Why one self-contained model (not two heads)
+
+Every single-model run so far started from the **lab-strong** side: `baseline` (lab 0.95, field 0.11)
+-> mixed training kept the lab (0.9592) but only learned field 0.4107. The fix is to start from the
+**field-strong** side: warm-start from the field-strong Stage-2 checkpoint (via `--init-from`) and
+continue with mixed PlantVillage+PlantDoc training (`--mix-with plantdoc`) to re-learn the lab while
+keeping the field. One shared head, no domain toggle, no router — the app ships a single model that
+handles real photos on its own.
+
+**Why not the two-head model?** two-head needs to know a photo's domain to pick a head. A "field photo"
+toggle is a poor product, and a lab-vs-field style classifier is its own hard problem (the plan's own
+caveat). Confidence fusion also fails: the lab head is *confidently wrong* on field photos (that is the
+0.11 field F1). A single mixed model avoids routing entirely.
+
+### Variants
+
+- **v11 `both_resnet50`**: the Sprint 4 `both` recipe on ResNet-50 (Stage 1 PlantVillage head-only
+  with `--backbone resnet50`, then Stage 2 PlantDoc fine-tune + `--augment`, last 2 blocks unfrozen).
+  Artifacts: `best_plantvillage_stage1_resnet50.pt` -> `best_plantdoc_stage2_resnet50.pt`.
+- **v12 `both_efficientnet`**: the same recipe on EfficientNet-B0
+  (`best_plantvillage_stage1_efficientnet.pt` -> `best_plantdoc_stage2_efficientnet.pt`).
+- **v13 `mixed_from_field_<winner>`**: the fine-tune-then-mix warm start — `--init-from` the field
+  winner (the higher PlantDoc F1 of v11/v12), then `--mix-with plantdoc` head-only mixed training,
+  10 epochs. The single self-contained candidate.
+
+### How it's implemented (new code)
+
+- `ml/model.py`: `MODEL_FEATURE_DIMS` now includes `resnet50` (2048). `build_model` sets the head on
+  `model.fc` for ResNets, `model.classifier` otherwise. `head_module(model)` returns whichever the
+  backbone uses (so `train.py` does not hard-code `.classifier`). `_feature_modules(model)` lists the
+  backbone's feature modules (MobileNet/EfficientNet: `features`; ResNet: `conv1..layer4`), and
+  `unfreeze_last_blocks` filters to parameter-bearing modules then unfreezes the last N — generic
+  across backbones.
+- `ml/train.py --backbone`: choice from `MODEL_FEATURE_DIMS`, saved in `model_kwargs` so
+  evaluate/predict rebuild the same architecture.
+- `ml/evaluate.py --tta`: test-time augmentation (average softmax over the image + its horizontal
+  flip). Worth ~1-3 points on the small field set; keep OFF for apples-to-apples ablations unless the
+  whole table is re-run with it.
+- `scripts/audit_plantdoc_labels.py`: scores every PlantDoc image with a field-strong checkpoint and
+  writes image path, mapped class, predicted class, confidence (sorted least-confident first) to CSV
+  for manual mislabel review.
+
+### The notebook steps (Sprint 7 numbering)
+
+| step | what it does | changes model? | produces |
+|---|---|---|---|
+| **train Stage 1** (Step 4) | head-only PlantVillage per new backbone | **YES** | `best_plantvillage_stage1_<backbone>.pt` |
+| **train v11/v12** (Steps 5/6) | Sprint 4 `both` recipe on each new backbone | **YES** | `best_plantdoc_stage2_<backbone>.pt` |
+| **evaluate v11/v12** (Step 7) | field ceiling per backbone, picks winner | no | metrics + CSV rows |
+| **train v13** (Step 8) | fine-tune-then-mix on the winner | **YES** | `best_plantvillage_mixed_from_field_<winner>.pt` |
+| **evaluate v13** (Step 9) | both gates on the single model | no | metrics + CSV rows |
+| **label audit** (Step 10) | flags PlantDoc mislabels with the field-strong winner | no | `plantdoc_label_audit_<winner>.csv` |
+| **verdict** (Step 11) | landscape + both gates | no | printed verdict |
+| **predict** (Step 12) | 2 field + 2 lab photos | no | human sanity check |
+
+### The two gates (must both pass on ONE checkpoint, no routing)
+
+1. **Field target:** PlantDoc F1 >= **0.60** (stretch 0.70) — the level MobileNetV2 never reached.
+2. **Lab recovered:** PlantVillage F1 >= 0.85.
+
+**Decision rule:** if v13 passes both gates it replaces `mixed` as the shipped app model. If the
+field-strong backbone clears 0.60 but v13 cannot keep the lab, the fallback is the two-head domain
+model with an automatic lab/field router. Beyond the backbone: label audit (Step 10), more real
+phone photos, TTA.
+
+### Quiz recap (Sprint 7)
+
+1. Why repeat the recipe on a new backbone? → MobileNetV2's field ceiling is ~0.56; the PlantDoc paper
+   reached ~0.70 accuracy with ResNet-50, and its extra capacity should survive real-photo clutter
+   better on the same recipe.
+2. What does "fine-tune, then mix" (v13) change? → it warm-starts from the field-strong Stage-2
+   checkpoint, so the head re-learns the lab from a point already good on field photos.
+3. Why not two heads? → two-head needs a domain decision to pick a head (toggle = poor product, router
+   = its own hard problem, confidence fusion fails on confidently-wrong lab predictions).
+4. Why does `ml/model.py` need `head_module()`? → torchvision ResNets call the head `fc`, MobileNets/
+   EfficientNets call it `classifier`; the optimizer must grab the right module per backbone.
+5. Why is 0.60 the real gate rather than 0.70? → our evaluation maps PlantDoc onto the 38-class
+   PlantVillage space (harder than PlantDoc's native classes), and the ~230-image test set makes
+   small deltas noisy.
+6. What is the cheapest lever past a plateau? → label cleaning: `audit_plantdoc_labels.py` scores each
+   PlantDoc image with the field-strong model and lists the least-confident ones for manual review.

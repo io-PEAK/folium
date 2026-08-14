@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cm-style", choices=("raw", "percent"), default="percent",
                         help="confusion matrix rendering: 'percent' (row-normalized, annotated; "
                              "small errors stay visible despite class imbalance) or 'raw' (counts)")
+    parser.add_argument("--tta", action="store_true",
+                        help="test-time augmentation: average softmax over the image and its "
+                             "horizontal flip. Bought ~1-3 F1 points on the small field set; keep "
+                             "OFF for apples-to-apples ablation comparisons unless the whole table "
+                             "is re-run with it")
     args = parser.parse_args()
     if args.confusion_path is None:
         stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.variant)
@@ -82,14 +87,16 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device):
+def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False):
     model.eval()
     all_preds, all_labels = [], []
     for images, labels in tqdm(loader, desc="eval", leave=False):
         images = images.to(device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            outputs = model(images)
-        all_preds.extend(outputs.argmax(dim=1).cpu().tolist())
+            probs = torch.softmax(model(images), dim=1)
+            if tta:
+                probs = (probs + torch.softmax(model(torch.flip(images, dims=[3])), dim=1)) / 2
+        all_preds.extend(probs.argmax(dim=1).cpu().tolist())
         all_labels.extend(labels.tolist())
     return np.asarray(all_preds), np.asarray(all_labels)
 
@@ -209,7 +216,7 @@ def main() -> None:
     loader = {"train": train_loader, "val": val_loader, "test": test_loader}[args.split]
 
     class_names = ckpt["class_names"]
-    preds, labels = predict_all(model, loader, device)
+    preds, labels = predict_all(model, loader, device, tta=args.tta)
     acc = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="macro", zero_division=0)
 
