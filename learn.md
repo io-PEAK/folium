@@ -611,13 +611,12 @@ the field number without giving up the lab.
 3. Why not just train on PlantDoc only? → that's `both`: great field (0.5578) but catastrophic
    forgetting (PlantVillage 0.3168).
 
-## Phase 6 - Sprint 7: stronger backbones for the field ceiling (built, awaiting the real run)
+## Phase 6 - Sprint 7: stronger backbones for the field ceiling (real run in, 2026-08-16)
 
-**Learned in:** Sprint 7 build — two things came together. First, MobileNetV2 is the bottleneck, not
-the recipe: its best field score is `both`'s 0.5578 and every sprint since (5/6) moved within
-0.41-0.56. Second, the "fine-tune, then mix" idea (warm-start from the field-strong checkpoint) is
-the right way to build ONE self-contained model. So Sprint 7 runs that idea on stronger feature
-extractors, which is what can actually clear the app-grade field target (>= 0.60).
+**Learned in:** Sprint 7 build + real run. MobileNetV2 looked like the bottleneck (its best field
+score is `both`'s 0.5578), so we repeated the field-strong and fine-tune-then-mix recipes on
+ResNet-50 and EfficientNet-B0. The headline: **backbone capacity does NOT change the lab-vs-field
+trade-off** — every backbone shows the same two outcomes, and no single model clears both gates yet.
 
 ### Where Sprint 6 left us (real run, 2026-08-14)
 
@@ -632,6 +631,40 @@ Oversampling PlantDoc 8x barely moved the field score (+0.0015, noise) and cost 
 the field bottleneck is NOT epoch share — `both` proved the head can hit 0.5578 when it spends all
 its time on field photos. The bottleneck is MobileNetV2 itself plus the one-shared-head balancing
 problem. The PlantDoc paper reported ~0.70 accuracy with ResNet-50 on its native classes/split.
+
+### Sprint 7 result (real run)
+
+| model (real runs) | PlantVillage F1 | PlantDoc F1 |
+|---|---|---|
+| baseline (MobileNetV2, PV only) | 0.9501 | 0.1116 |
+| both (MobileNetV2, PD fine-tune) | 0.3168 | 0.5578 |
+| both_resnet50 (v11) | 0.2857 | **0.6554** |
+| both_efficientnet (v12) | 0.4541 | 0.5719 |
+| mixed (MobileNetV2) | **0.9592** | 0.4107 |
+| v13 mixed_from_field_resnet50 | 0.9589 | 0.4238 |
+
+**The 3-backbone finding — capacity does not buy both domains.** Every backbone splits into the same
+two outcomes:
+
+- **Field-strong (v11/v12):** high field, catastrophic lab forgetting. `both_resnet50` set a new
+  field ceiling (**0.6554**, clearing the 0.60 gate) but its lab F1 (0.2857) is the worst yet — the
+  bigger the backbone, the deeper it digs into field photos and the worse it forgets the lab.
+  `both_efficientnet` is the most balanced (0.5719 / 0.4541) but fails both gates.
+- **Mixed (v13):** lab recovered (0.9589, gate PASS), field collapses back to ~0.42 (gate FAIL). The
+  field-strong warm start barely helped (0.4238 vs `mixed`'s 0.4107 — ~noise on the 230-image test
+  set). **Verdict: field 0.4238 < 0.60 -> FAIL | lab 0.9589 >= 0.85 -> PASS.**
+
+So the lab-vs-field tension is **structural, not a MobileNetV2 limitation**: mixed training re-learns
+the shared head on lab-dominated batches (PlantDoc is ~5% of every epoch) and wipes the field again,
+on every backbone. The consistent Pareto frontier — no model above 0.60 field **and** 0.85 lab at the
+same time — is itself the publishable empirical finding.
+
+**Notebook bug found along the way (fixed, `0a70a8f`):** Stage-2 checkpoint paths were built from the
+backbone variable name (`efficientnet_b0`) while training tags used short names (`stage2_efficientnet`),
+so v12's evaluate/init-from/audit looked for a non-existent `..._efficientnet_b0.pt`
+(`FileNotFoundError`). `resnet50` worked only by coincidence. Fix: explicit `STAGE2_CKPT` map in Step 1.
+Moral: don't derive filenames from variable names — the CSV dedup (`variant + checkpoint`) then treats
+re-runs with the same tag as the same run.
 
 ### The honest ceiling (why 0.60 is plausible, 0.70 is aspirational)
 
@@ -667,7 +700,10 @@ caveat). Confidence fusion also fails: the lab head is *confidently wrong* on fi
   (`best_plantvillage_stage1_efficientnet.pt` -> `best_plantdoc_stage2_efficientnet.pt`).
 - **v13 `mixed_from_field_<winner>`**: the fine-tune-then-mix warm start — `--init-from` the field
   winner (the higher PlantDoc F1 of v11/v12), then `--mix-with plantdoc` head-only mixed training,
-  10 epochs. The single self-contained candidate.
+  10 epochs. The single self-contained candidate. Result: field 0.4238 / lab 0.9589 (field gate FAIL).
+- **v13_x8 `mixed_from_field_<winner>_x8` (next test)**: v13 + `--plantdoc-repeat 8` (~28% field
+  share). Needs a DISTINCT tag so it saves its own checkpoint and logs its own CSV row (dedup keys on
+  `variant + checkpoint`; same tag would be skipped as a duplicate and overwrite the old checkpoint).
 
 ### How it's implemented (new code)
 
@@ -704,10 +740,36 @@ caveat). Confidence fusion also fails: the lab head is *confidently wrong* on fi
 1. **Field target:** PlantDoc F1 >= **0.60** (stretch 0.70) — the level MobileNetV2 never reached.
 2. **Lab recovered:** PlantVillage F1 >= 0.85.
 
-**Decision rule:** if v13 passes both gates it replaces `mixed` as the shipped app model. If the
-field-strong backbone clears 0.60 but v13 cannot keep the lab, the fallback is the two-head domain
-model with an automatic lab/field router. Beyond the backbone: label audit (Step 10), more real
-phone photos, TTA.
+**Decision rule (as applied):** v13 did NOT pass — field 0.4238 < 0.60 (lab 0.9589 >= 0.85 OK). The
+field-strong backbone cleared 0.60 (0.6554) but no single model keeps the lab. Per the plan the
+fallback is the two-head domain model with an automatic lab/field router — invoked only if the
+cheaper single-model levers below fail.
+
+### Future thoughts (decided 2026-08-16)
+
+1. **Cheapest decisive test — give the field a bigger mixed share.** v13 trains head-only with PlantDoc
+   at its natural ~5% of every epoch; that is why the head re-collapses to lab. The trainer already
+   supports `--plantdoc-repeat N` (Sprint 6 used 8 -> ~28% field share and lab stayed 0.9362, >= 0.85).
+   Re-run v13 as `mixed_from_field_resnet50_x8` (distinct tag -> distinct checkpoint -> distinct CSV
+   row). If field climbs with lab still >= 0.85, single-model is alive; if it plateaus below 0.60,
+   accept the frontier and pivot.
+2. **Do NOT switch datasets.** A cleaner field dataset is not the fix: (a) the v13 collapse is a recipe
+   problem (epoch share), not labels; (b) every other field dataset (PlantVillage-Taiwan, Cassava Leaf,
+   AI Challenger, PlantCLEF) has its own taxonomy, so remapping into our 38 classes would re-introduce
+   the very label ambiguity we would be escaping; (c) it would break the paper's PlantVillage+PlantDoc
+   continuity.
+3. **If x8 plateaus: label audit (Step 10).** `audit_plantdoc_labels.py` quantifies PlantDoc's
+   crowd-sourced mislabels — that caps the field-strong *ceiling* (0.6554), not the v13 collapse, and
+   is the lever for the 0.70 stretch.
+4. **Real phone photos** stay the product-aligned lever (the app's success criteria already require
+   them) and the paper's differentiator: labels we control, already in the 38-class schema.
+5. **Router fallback** (only if single-model is ruled out): lab-strong `mixed` + field-strong
+   `both_resnet50` behind an automatic router. Product concern: a domain toggle is poor UX and a
+   lab-vs-field style classifier is its own hard problem.
+6. **Paper angle:** whatever single-model run concludes, the 3-backbone x {field-strong, mixed}
+   landscape is the empirical robustness study. A third dataset (e.g., Cassava Leaf or
+   PlantVillage-Taiwan) used as an *external validation* set — not merged into training — is a good
+   paper addition.
 
 ### Quiz recap (Sprint 7)
 
@@ -725,3 +787,11 @@ phone photos, TTA.
    small deltas noisy.
 6. What is the cheapest lever past a plateau? → label cleaning: `audit_plantdoc_labels.py` scores each
    PlantDoc image with the field-strong model and lists the least-confident ones for manual review.
+7. Why did v13 (warm-started mix) still collapse on field (0.4238)? → mixed training re-trains the
+   shared head on lab-dominated batches (PlantDoc ~5% of every epoch), wiping the field again
+   regardless of the backbone's capacity. The warm start only bought ~noise over `mixed` (0.4107).
+8. Why is a 0.42 vs 0.41 difference noise? → the PlantDoc test set is ~230 mapped images; +/-0.03-0.05
+   F1 swings are noise, so comparisons must beat that band.
+9. Why not fix the collapse with a cleaner dataset? → the collapse is an epoch-share/recipe problem,
+   not a data problem, and other field datasets have different taxonomies (remapping re-introduces
+   label noise). New data is a *ceiling* lever (audit, phone photos), not a *collapse* fix.
