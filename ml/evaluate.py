@@ -29,7 +29,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_f
 from tqdm import tqdm
 
 from .data_loading import build_loaders
-from .model import build_model
+from .model import build_model, DualHeadModel
 
 CM_ANNOT_THRESHOLD_PERCENT = 2.0  # only annotate percent cells at least this significant
 
@@ -79,6 +79,9 @@ def parse_args() -> argparse.Namespace:
                              "horizontal flip. Bought ~1-3 F1 points on the small field set; keep "
                              "OFF for apples-to-apples ablation comparisons unless the whole table "
                              "is re-run with it")
+    parser.add_argument("--dual-head", action="store_true",
+                        help="Sprint 8: load a DualHeadModel checkpoint and use predict_dual() "
+                             "to pick the higher-confidence head per sample")
     args = parser.parse_args()
     if args.confusion_path is None:
         stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.variant)
@@ -87,16 +90,20 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False):
+def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False, dual_head: bool = False):
     model.eval()
     all_preds, all_labels = [], []
     for images, labels in tqdm(loader, desc="eval", leave=False):
         images = images.to(device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            probs = torch.softmax(model(images), dim=1)
-            if tta:
-                probs = (probs + torch.softmax(model(torch.flip(images, dims=[3])), dim=1)) / 2
-        all_preds.extend(probs.argmax(dim=1).cpu().tolist())
+            if dual_head:
+                preds = model.predict_dual(images)
+            else:
+                probs = torch.softmax(model(images), dim=1)
+                if tta:
+                    probs = (probs + torch.softmax(model(torch.flip(images, dims=[3])), dim=1)) / 2
+                preds = probs.argmax(dim=1)
+        all_preds.extend(preds.cpu().tolist())
         all_labels.extend(labels.tolist())
     return np.asarray(all_preds), np.asarray(all_labels)
 
@@ -202,8 +209,23 @@ def main() -> None:
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
-    model = build_model(**ckpt["model_kwargs"])
-    model.load_state_dict(ckpt["state_dict"])
+    if args.dual_head:
+        model = DualHeadModel.__new__(DualHeadModel)
+        in_features = ckpt["model_kwargs"]["in_features"] if "in_features" in ckpt["model_kwargs"] else None
+        if in_features is None:
+            from .model import MODEL_FEATURE_DIMS
+            in_features = MODEL_FEATURE_DIMS[ckpt["model_kwargs"]["backbone"]]
+        model.__init__(
+            backbone=None,
+            in_features=in_features,
+            num_classes=ckpt["model_kwargs"]["num_classes"],
+            backbone_name=ckpt["model_kwargs"]["backbone"],
+        )
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
+    else:
+        model = build_model(**ckpt["model_kwargs"])
+        model.load_state_dict(ckpt["state_dict"])
     model.to(device)
 
     train_loader, val_loader, test_loader, _ = build_loaders(
@@ -216,7 +238,7 @@ def main() -> None:
     loader = {"train": train_loader, "val": val_loader, "test": test_loader}[args.split]
 
     class_names = ckpt["class_names"]
-    preds, labels = predict_all(model, loader, device, tta=args.tta)
+    preds, labels = predict_all(model, loader, device, tta=args.tta, dual_head=args.dual_head)
     acc = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="macro", zero_division=0)
 

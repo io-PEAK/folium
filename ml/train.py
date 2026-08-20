@@ -38,7 +38,7 @@ from torch import nn
 from tqdm import tqdm
 
 from .data_loading import build_loaders
-from .model import MODEL_FEATURE_DIMS, build_model, head_module, unfreeze_last_blocks
+from .model import MODEL_FEATURE_DIMS, build_model, build_dual_head_model, DualHeadModel, head_module, unfreeze_last_blocks
 
 DEFAULT_SEED = 42
 
@@ -83,6 +83,13 @@ def parse_args() -> argparse.Namespace:
                         help="Sprint 6: repeat the PlantDoc train set N times inside the mixed "
                              "loader so field photos get a bigger share of every epoch (PlantDoc is "
                              "naturally ~5 percent; e.g. 8 -> ~28 percent). Only used with --mix-with plantdoc.")
+    parser.add_argument("--dual-head", action="store_true",
+                        help="Sprint 8: use DualHeadModel with two independent classification "
+                             "heads (head_lab + head_field) instead of a single shared head. "
+                             "Eliminates catastrophic forgetting by keeping each domain separate.")
+    parser.add_argument("--train-head", default=None, choices=("lab", "field"),
+                        help="With --dual-head: which head to train (lab=PlantVillage, "
+                             "field=PlantDoc). The other head is frozen.")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
     return parser.parse_args()
@@ -113,6 +120,7 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     device: torch.device,
+    active_head: str | None = None,
 ) -> tuple[float, float]:
     model.train()
     running_loss, correct, total = 0.0, 0, 0
@@ -122,7 +130,11 @@ def train_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with _cuda_autocast():
-            outputs = model(images)
+            raw_out = model(images)
+            if active_head is not None:
+                outputs = raw_out[0] if active_head == "lab" else raw_out[1]
+            else:
+                outputs = raw_out
             loss = criterion(outputs, labels)
 
         scaler.scale(loss).backward()
@@ -141,13 +153,18 @@ def validate(
     loader: torch.utils.data.DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    active_head: str | None = None,
 ) -> tuple[float, float]:
     model.eval()
     running_loss, correct, total = 0.0, 0, 0
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         with _cuda_autocast():
-            outputs = model(images)
+            raw_out = model(images)
+            if active_head is not None:
+                outputs = raw_out[0] if active_head == "lab" else raw_out[1]
+            else:
+                outputs = raw_out
             loss = criterion(outputs, labels)
         running_loss += loss.item() * images.size(0)
         correct += (outputs.argmax(dim=1) == labels).sum().item()
@@ -202,7 +219,20 @@ def main() -> None:
         plantdoc_repeat=args.plantdoc_repeat,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True, "freeze": True}
-    model = build_model(**model_kwargs).to(device)
+
+    if args.dual_head:
+        model = build_dual_head_model(
+            num_classes=len(class_names),
+            backbone=args.backbone,
+            pretrained=True,
+        ).to(device)
+        if args.train_head is not None:
+            model.freeze_all_except(args.train_head)
+            print(f"DualHead: training head_{args.train_head}, other head frozen", flush=True)
+        dual_head_mode = True
+    else:
+        model = build_model(**model_kwargs).to(device)
+        dual_head_mode = False
 
     if args.init_from is not None:
         init_ckpt = torch.load(args.init_from, map_location="cpu")
@@ -213,17 +243,28 @@ def main() -> None:
             )
         model.load_state_dict(init_ckpt["state_dict"])
         print(f"Warm-started weights from {args.init_from}", flush=True)
+        if dual_head_mode and args.train_head is not None:
+            model.freeze_all_except(args.train_head)
+            print(f"DualHead: re-froze after init, training head_{args.train_head}", flush=True)
 
-    if args.unfreeze_blocks > 0:
+    if not dual_head_mode and args.unfreeze_blocks > 0:
         unfreeze_last_blocks(model, args.unfreeze_blocks)
         print(f"Unfroze last {args.unfreeze_blocks} parameter-bearing backbone modules", flush=True)
 
     criterion = nn.CrossEntropyLoss()
-    head_params = list(head_module(model).parameters())
-    backbone_params = [
-        p for p in model.parameters()
-        if p.requires_grad and all(id(p) != id(h) for h in head_params)
-    ]
+    if dual_head_mode:
+        active_head = model.get_head(args.train_head or "lab")
+        head_params = list(active_head.parameters())
+        backbone_params = [
+            p for p in model.parameters()
+            if p.requires_grad and all(id(p) != id(h) for h in head_params)
+        ]
+    else:
+        head_params = list(head_module(model).parameters())
+        backbone_params = [
+            p for p in model.parameters()
+            if p.requires_grad and all(id(p) != id(h) for h in head_params)
+        ]
     optimizer = torch.optim.Adam(
         [
             {"params": backbone_params, "lr": args.lr},
@@ -246,7 +287,9 @@ def main() -> None:
         best_val_acc = ckpt.get("val_acc", 0.0)
         print(f"Resumed from {args.resume} at epoch {ckpt['epoch']} (best val acc {best_val_acc:.4f})")
 
-    mode = "fine-tuning" if args.unfreeze_blocks > 0 else "head-only"
+    mode = "dual-head" if dual_head_mode else ("fine-tuning" if args.unfreeze_blocks > 0 else "head-only")
+    if dual_head_mode and args.train_head:
+        mode = f"dual-head({args.train_head})"
     dataset_label = f"{args.dataset}+{args.mix_with}" if args.mix_with else args.dataset
     if args.mix_with and args.plantdoc_repeat > 1:
         dataset_label = f"{dataset_label} x{args.plantdoc_repeat}"
@@ -255,8 +298,8 @@ def main() -> None:
           f"backbone={args.backbone}, lr={args.lr}, head_lr={args.head_lr or args.lr}, "
           f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device)
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, active_head=args.train_head)
+        val_loss, val_acc = validate(model, val_loader, criterion, device, active_head=args.train_head)
         print(f"epoch {epoch:02d}/{args.epochs}: train loss {train_loss:.4f} acc {train_acc:.4f} | val loss {val_loss:.4f} acc {val_acc:.4f}", flush=True)
 
         save_checkpoint(

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 
 from ml.data_loading import _MappedImageFolder, _load_class_map, make_transforms
-from ml.model import build_model
+from ml.model import build_model, DualHeadModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +47,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
+    parser.add_argument("--dual-head", action="store_true",
+                        help="Load a DualHeadModel checkpoint and use predict_dual() "
+                             "to pick the higher-confidence head per sample")
     return parser.parse_args()
 
 
@@ -57,8 +60,22 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     class_names = ckpt["class_names"]
-    model = build_model(**ckpt["model_kwargs"])
-    model.load_state_dict(ckpt["state_dict"])
+
+    if args.dual_head:
+        from .model import MODEL_FEATURE_DIMS
+        in_features = MODEL_FEATURE_DIMS[ckpt["model_kwargs"]["backbone"]]
+        model = DualHeadModel.__new__(DualHeadModel)
+        model.__init__(
+            backbone=None,
+            in_features=in_features,
+            num_classes=ckpt["model_kwargs"]["num_classes"],
+            backbone_name=ckpt["model_kwargs"]["backbone"],
+        )
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
+    else:
+        model = build_model(**ckpt["model_kwargs"])
+        model.load_state_dict(ckpt["state_dict"])
     model.to(device).eval()
 
     class_map = _load_class_map(args.data_dir)
@@ -75,9 +92,20 @@ def main() -> None:
     for images, _ in loader:
         images = images.to(device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            sm = torch.softmax(model(images), dim=1)
-        preds.extend(sm.argmax(dim=1).cpu().tolist())
-        probs.extend(sm.max(dim=1).values.cpu().tolist())
+            if args.dual_head:
+                pred_tensor = model.predict_dual(images)
+                preds.extend(pred_tensor.cpu().tolist())
+                lab_out, field_out = model(images)
+                lab_probs = torch.softmax(lab_out, dim=1)
+                field_probs = torch.softmax(field_out, dim=1)
+                lab_conf = lab_probs.max(dim=1).values
+                field_conf = field_probs.max(dim=1).values
+                conf = torch.where(lab_conf >= field_conf, lab_conf, field_conf)
+                probs.extend(conf.cpu().tolist())
+            else:
+                sm = torch.softmax(model(images), dim=1)
+                preds.extend(sm.argmax(dim=1).cpu().tolist())
+                probs.extend(sm.max(dim=1).values.cpu().tolist())
 
     rows = []
     for (path, true_label), pred, prob in zip(mapped.samples, preds, probs):

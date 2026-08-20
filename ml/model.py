@@ -110,3 +110,96 @@ def unfreeze_last_blocks(model: nn.Module, n_blocks: int) -> None:
 def trainable_parameters(model: nn.Module):
     """Iterate parameters with ``requires_grad=True`` (the optimizer's job)."""
     return (p for p in model.parameters() if p.requires_grad)
+
+
+class DualHeadModel(nn.Module):
+    """Backbone with two independent classification heads (Sprint 8).
+
+    Solves the lab-vs-field catastrophic forgetting: each head trains on its
+    own domain and never sees the other.  At inference, ``predict_dual()``
+    runs both heads and returns the higher-confidence prediction per sample.
+
+    Architecture::
+
+        backbone (shared, frozen)
+          ├── head_lab   → trained on PlantVillage only
+          └── head_field → trained on PlantDoc only
+    """
+
+    def __init__(self, backbone: nn.Module, in_features: int, num_classes: int, backbone_name: str):
+        super().__init__()
+        self.backbone = backbone
+        self.backbone_name = backbone_name
+        self.in_features = in_features
+        self.num_classes = num_classes
+
+        self.head_lab = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
+        self.head_field = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the backbone up to the pooling layer, return flat feature vector."""
+        x = self.backbone(x)
+        return torch.flatten(x, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (lab_logits, field_logits)."""
+        features = self.extract_features(x)
+        return self.head_lab(features), self.head_field(features)
+
+    @torch.no_grad()
+    def predict_dual(self, x: torch.Tensor) -> torch.Tensor:
+        """Run both heads, return the argmax from the higher-confidence head per sample."""
+        lab_out, field_out = self.forward(x)
+        lab_probs = torch.softmax(lab_out, dim=1)
+        field_probs = torch.softmax(field_out, dim=1)
+        lab_conf = lab_probs.max(dim=1).values
+        field_conf = field_probs.max(dim=1).values
+
+        use_lab = lab_conf >= field_conf
+        lab_preds = lab_out.argmax(dim=1)
+        field_preds = field_out.argmax(dim=1)
+        return torch.where(use_lab, lab_preds, field_preds)
+
+    def get_head(self, which: str) -> nn.Module:
+        """Return ``head_lab`` or ``head_field``."""
+        if which == "lab":
+            return self.head_lab
+        if which == "field":
+            return self.head_field
+        raise ValueError(f"which must be 'lab' or 'field', got '{which}'")
+
+    def freeze_all_except(self, which: str) -> None:
+        """Freeze everything except the named head (and its dependencies)."""
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in self.get_head(which).parameters():
+            param.requires_grad = True
+
+
+def build_dual_head_model(
+    num_classes: int,
+    backbone: str = "resnet50",
+    pretrained: bool = True,
+) -> DualHeadModel:
+    """Build a ``DualHeadModel`` with a frozen backbone and two fresh heads."""
+    if backbone not in MODEL_FEATURE_DIMS:
+        raise ValueError(f"Unsupported backbone '{backbone}'; choose from {sorted(MODEL_FEATURE_DIMS)}")
+
+    raw = getattr(models, backbone)(weights=_pretrained_weights(backbone) if pretrained else None)
+
+    # Freeze backbone
+    for param in raw.parameters():
+        param.requires_grad = False
+
+    # Strip the original head — keep only the feature-extraction path
+    in_features = MODEL_FEATURE_DIMS[backbone]
+    if "resnet" in backbone:
+        feature_backbone = nn.Sequential(
+            raw.conv1, raw.bn1, raw.relu, raw.maxpool,
+            raw.layer1, raw.layer2, raw.layer3, raw.layer4,
+            raw.avgpool,
+        )
+    else:
+        feature_backbone = raw.features
+
+    return DualHeadModel(feature_backbone, in_features, num_classes, backbone)

@@ -801,3 +801,52 @@ cheaper single-model levers below fail.
 9. Why not fix the collapse with a cleaner dataset? → the collapse is an epoch-share/recipe problem,
    not a data problem, and other field datasets have different taxonomies (remapping re-introduces
    label noise). New data is a *ceiling* lever (audit, phone photos), not a *collapse* fix.
+
+## Phase 7 — Sprint 8: Dual-Head Architecture (in progress, 2026-08-17)
+
+**What this sprint solves:** Sprint 7 proved the lab-vs-field trade-off is structural across 3
+backbones. No single shared head can stay good at both domains because mixed training overwrites
+the head on whichever domain dominates each epoch. The fix: two independent heads on the same
+backbone, each trained on its own domain — zero interference, zero catastrophic forgetting.
+
+**Architecture:**
+```
+backbone (shared, frozen)
+  ├── head_lab   → trained on PlantVillage only
+  └── head_field → trained on PlantDoc only
+```
+
+**Why this works:**
+- Head_lab only sees lab photos → never learns field patterns → stays strong on lab
+- Head_field only sees field photos → never learns lab patterns → stays strong on field
+- Backbone is shared and frozen → no interference between heads
+- At inference: both heads run, higher confidence wins per sample
+
+**Training flow:**
+1. Stage 1: train head_lab on PlantVillage (backbone frozen, head_field frozen)
+2. Stage 2: freeze head_lab, train head_field on PlantDoc (backbone frozen)
+3. Evaluate: both heads, confidence-based selection
+
+**Key insight:** This is the architectural fix for catastrophic forgetting. The problem was never
+the backbone's capacity — it was the shared head being overwritten. Two heads = two specialists.
+
+**Code changes:**
+- `ml/model.py`: added `DualHeadModel` class with `extract_features()`, `forward()`, `predict_dual()`, `freeze_all_except()`
+- `ml/train.py`: added `--dual-head` and `--train-head` flags; training loop handles tuple output
+- `ml/evaluate.py`: added `--dual-head` flag; `predict_all()` uses `predict_dual()` when set
+- `scripts/audit_plantdoc_labels.py`: added `--dual-head` support
+
+### Quiz recap (Sprint 8)
+
+1. Why did a single head fail across all 3 backbones? → the shared head gets overwritten by whichever
+   domain dominates each epoch; it's catastrophic forgetting, not a capacity problem.
+2. How does dual-head fix it? → each head only trains on its own domain, so neither forgets.
+   The backbone is shared but frozen, so there's no interference.
+3. What happens at inference? → both heads run on the same image; the one with higher confidence
+   wins. No learned router needed — confidence IS the domain proxy.
+4. Why not two separate models? → dual-head shares the backbone (saves memory), keeps both heads
+   in one checkpoint (simpler serving), and the backbone learns general features useful to both.
+5. What's the training order? → lab first (PlantVillage, clean data), then field (PlantDoc, mapped).
+   Order matters: field training doesn't touch head_lab, so lab quality is preserved.
+6. How does `--init-from` work with dual-head? → loads the full state_dict (both heads), then
+   `freeze_all_except("field")` re-freezes everything except the head being trained.
