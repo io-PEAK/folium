@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 
 from ml.data_loading import _MappedImageFolder, _load_class_map, make_transforms
-from ml.model import build_model, DualHeadModel
+from ml.model import build_model, build_dual_head_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,14 +62,9 @@ def main() -> None:
     class_names = ckpt["class_names"]
 
     if args.dual_head:
-        from .model import MODEL_FEATURE_DIMS
-        in_features = MODEL_FEATURE_DIMS[ckpt["model_kwargs"]["backbone"]]
-        model = DualHeadModel.__new__(DualHeadModel)
-        model.__init__(
-            backbone=None,
-            in_features=in_features,
+        model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
-            backbone_name=ckpt["model_kwargs"]["backbone"],
+            backbone=ckpt["model_kwargs"]["backbone"],
         )
         model.load_state_dict(ckpt["state_dict"])
         print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)

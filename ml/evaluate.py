@@ -29,7 +29,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_f
 from tqdm import tqdm
 
 from .data_loading import build_loaders
-from .model import build_model, DualHeadModel
+from .model import build_model, build_dual_head_model
 
 CM_ANNOT_THRESHOLD_PERCENT = 2.0  # only annotate percent cells at least this significant
 
@@ -210,16 +210,9 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     if args.dual_head:
-        model = DualHeadModel.__new__(DualHeadModel)
-        in_features = ckpt["model_kwargs"]["in_features"] if "in_features" in ckpt["model_kwargs"] else None
-        if in_features is None:
-            from .model import MODEL_FEATURE_DIMS
-            in_features = MODEL_FEATURE_DIMS[ckpt["model_kwargs"]["backbone"]]
-        model.__init__(
-            backbone=None,
-            in_features=in_features,
+        model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
-            backbone_name=ckpt["model_kwargs"]["backbone"],
+            backbone=ckpt["model_kwargs"]["backbone"],
         )
         model.load_state_dict(ckpt["state_dict"])
         print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
