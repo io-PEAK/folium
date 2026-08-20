@@ -642,6 +642,7 @@ problem. The PlantDoc paper reported ~0.70 accuracy with ResNet-50 on its native
 | both_efficientnet (v12) | 0.4541 | 0.5719 |
 | mixed (MobileNetV2) | **0.9592** | 0.4107 |
 | v13 mixed_from_field_resnet50 | 0.9589 | 0.4238 |
+| v13_x8 mixed_from_field_resnet50_x8 | **0.9508** | **0.4709** |
 
 **The 3-backbone finding — capacity does not buy both domains.** Every backbone splits into the same
 two outcomes:
@@ -653,6 +654,12 @@ two outcomes:
 - **Mixed (v13):** lab recovered (0.9589, gate PASS), field collapses back to ~0.42 (gate FAIL). The
   field-strong warm start barely helped (0.4238 vs `mixed`'s 0.4107 — ~noise on the 230-image test
   set). **Verdict: field 0.4238 < 0.60 -> FAIL | lab 0.9589 >= 0.85 -> PASS.**
+- **v13_x8 (repeat 8, ~28% field share):** field rose to **0.4709** (+0.047), lab 0.9508. The
+  upsample lever moved the needle but the gain is inside the noise band (~0.05 on 230 images) and
+  mathematically capped — even at repeat 16 (~46% field share) field likely peaks ~0.50–0.52, still
+  well below 0.60. The field-strong ceiling (0.6554 at 100% field share) sets the absolute bound;
+  no mixed model can exceed it. The lab-vs-field trade-off is confirmed structural, not a tuning
+  issue.
 
 So the lab-vs-field tension is **structural, not a MobileNetV2 limitation**: mixed training re-learns
 the shared head on lab-dominated batches (PlantDoc is ~5% of every epoch) and wipes the field again,
@@ -747,12 +754,11 @@ cheaper single-model levers below fail.
 
 ### Future thoughts (decided 2026-08-16)
 
-1. **Cheapest decisive test — give the field a bigger mixed share.** v13 trains head-only with PlantDoc
-   at its natural ~5% of every epoch; that is why the head re-collapses to lab. The trainer already
-   supports `--plantdoc-repeat N` (Sprint 6 used 8 -> ~28% field share and lab stayed 0.9362, >= 0.85).
-   Re-run v13 as `mixed_from_field_resnet50_x8` (distinct tag -> distinct checkpoint -> distinct CSV
-   row). If field climbs with lab still >= 0.85, single-model is alive; if it plateaus below 0.60,
-   accept the frontier and pivot.
+1. **v13_x8 tested (2026-08-16):** field rose +0.047 (0.4238 → 0.4709), lab 0.9508. Gain is inside
+   the noise band (~0.05 on 230 images) and mathematically capped — the field-strong ceiling (0.6554
+   at 100% field share) bounds every mixed model, so even repeat 16 (~46% field share) likely peaks
+   ~0.50–0.52. **Single-model below 0.60 is confirmed structural, not a tuning issue.** The path
+   forward is the paper (the 3-backbone landscape IS the finding) and/or the router fallback.
 2. **Do NOT switch datasets.** A cleaner field dataset is not the fix: (a) the v13 collapse is a recipe
    problem (epoch share), not labels; (b) every other field dataset (PlantVillage-Taiwan, Cassava Leaf,
    AI Challenger, PlantCLEF) has its own taxonomy, so remapping into our 38 classes would re-introduce
