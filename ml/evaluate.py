@@ -80,12 +80,13 @@ def parse_args() -> argparse.Namespace:
                              "OFF for apples-to-apples ablation comparisons unless the whole table "
                              "is re-run with it")
     parser.add_argument("--dual-head", action="store_true",
-                        help="Sprint 8: load a DualHeadModel checkpoint and use predict_dual() "
-                             "to pick the higher-confidence head per sample")
+                        help="Sprint 8: load a DualHeadModel checkpoint")
+    parser.add_argument("--predict-mode", default="routed", choices=("routed", "dual"),
+                        help="Sprint 8: 'routed' uses domain classifier to route to the "
+                             "correct head (default); 'dual' uses confidence-race fallback")
     parser.add_argument("--eval-head", default=None, choices=("lab", "field"),
                         help="Sprint 8: evaluate only one head (lab or field) instead of "
-                             "predict_dual. Use this to measure each head's true score "
-                             "without the other head overriding predictions.")
+                             "routing. Use this to measure each head's true score.")
     args = parser.parse_args()
     if args.confusion_path is None:
         stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.variant)
@@ -94,7 +95,7 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False, dual_head: bool = False, eval_head: str | None = None):
+def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False, dual_head: bool = False, eval_head: str | None = None, predict_mode: str = "routed"):
     model.eval()
     all_preds, all_labels = [], []
     for images, labels in tqdm(loader, desc="eval", leave=False):
@@ -102,7 +103,9 @@ def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, dev
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
             if eval_head is not None:
                 preds = model.predict_head(images, eval_head)
-            elif dual_head:
+            elif dual_head and predict_mode == "routed":
+                preds = model.predict_routed(images)
+            elif dual_head and predict_mode == "dual":
                 preds = model.predict_dual(images)
             else:
                 probs = torch.softmax(model(images), dim=1)
@@ -216,14 +219,16 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     if args.eval_head and not args.dual_head:
-        parser.error("--eval-head requires --dual-head")
+        raise ValueError("--eval-head requires --dual-head")
 
     if args.dual_head:
         model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
             backbone=ckpt["model_kwargs"]["backbone"],
         )
-        model.load_state_dict(ckpt["state_dict"])
+        missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+        if missing:
+            print(f"Note: missing keys (expected for older checkpoints): {missing}", flush=True)
         print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
     else:
         model = build_model(**ckpt["model_kwargs"])
@@ -241,8 +246,10 @@ def main() -> None:
 
     class_names = ckpt["class_names"]
     if args.eval_head:
-        print(f"Evaluating only head_{args.eval_head} (no predict_dual)", flush=True)
-    preds, labels = predict_all(model, loader, device, tta=args.tta, dual_head=args.dual_head, eval_head=args.eval_head)
+        print(f"Evaluating only head_{args.eval_head}", flush=True)
+    elif args.dual_head:
+        print(f"Dual-head predict_mode={args.predict_mode}", flush=True)
+    preds, labels = predict_all(model, loader, device, tta=args.tta, dual_head=args.dual_head, eval_head=args.eval_head, predict_mode=args.predict_mode)
     acc = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="macro", zero_division=0)
 

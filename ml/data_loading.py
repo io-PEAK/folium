@@ -232,3 +232,62 @@ def build_loaders(
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **common)
 
     return train_loader, val_loader, test_loader, class_names
+
+
+class _DomainDataset(torch.utils.data.Dataset):
+    """Wraps two datasets, replacing class labels with domain labels (0=lab, 1=field).
+
+    Used for training the domain classifier that routes images to the correct head.
+    """
+
+    def __init__(self, lab_dataset, field_dataset):
+        self.lab_dataset = lab_dataset
+        self.field_dataset = field_dataset
+
+    def __len__(self):
+        return len(self.lab_dataset) + len(self.field_dataset)
+
+    def __getitem__(self, idx):
+        if idx < len(self.lab_dataset):
+            image, _ = self.lab_dataset[idx]
+            return image, 0
+        image, _ = self.field_dataset[idx - len(self.lab_dataset)]
+        return image, 1
+
+
+def build_domain_loaders(
+    data_dir: str,
+    batch_size: int = 32,
+    num_workers: int = 2,
+    seed: int = 42,
+    augment: bool = True,
+) -> tuple[DataLoader, DataLoader]:
+    """Build domain classification loaders (PV=lab, PD=field).
+
+    Returns (train_loader, val_loader) where each sample is (image, domain_label).
+    domain_label: 0=lab (PlantVillage), 1=field (PlantDoc).
+    """
+    data_dir = Path(data_dir)
+    pv_root = data_dir / "plantvillage"
+    pd_root = data_dir / "plantdoc"
+    class_map = _load_class_map(data_dir)
+    pv_names = datasets.ImageFolder(str(pv_root / "train")).classes
+
+    pv_train = datasets.ImageFolder(str(pv_root / "train"), transform=make_transforms(augment=augment))
+    pd_train = _MappedImageFolder(pd_root / "train", class_map, pv_names, transform=make_transforms(augment=augment))
+    pv_val = datasets.ImageFolder(str(pv_root / "val"), transform=make_transforms())
+    pd_val = _MappedImageFolder(pd_root / "val", class_map, pv_names, transform=make_transforms())
+
+    train_ds = _DomainDataset(pv_train, pd_train)
+    val_ds = _DomainDataset(pv_val, pd_val)
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    common = {
+        "num_workers": num_workers,
+        "pin_memory": True,
+        "worker_init_fn": _worker_init_fn,
+    }
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=generator, **common)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **common)
+    return train_loader, val_loader

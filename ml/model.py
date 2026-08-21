@@ -116,14 +116,15 @@ class DualHeadModel(nn.Module):
     """Backbone with two independent classification heads (Sprint 8).
 
     Solves the lab-vs-field catastrophic forgetting: each head trains on its
-    own domain and never sees the other.  At inference, ``predict_dual()``
-    runs both heads and returns the higher-confidence prediction per sample.
+    own domain and never sees the other.  A lightweight domain classifier
+    routes each image to the correct head at inference time.
 
     Architecture::
 
         backbone (shared, frozen)
-          ├── head_lab   → trained on PlantVillage only
-          └── head_field → trained on PlantDoc only
+          ├── head_lab          -> trained on PlantVillage only
+          ├── head_field        -> trained on PlantDoc only
+          └── domain_classifier -> trained on both (lab=0, field=1)
     """
 
     def __init__(self, backbone: nn.Module, in_features: int, num_classes: int, backbone_name: str):
@@ -135,6 +136,7 @@ class DualHeadModel(nn.Module):
 
         self.head_lab = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
         self.head_field = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
+        self.domain_classifier = nn.Linear(in_features, 2)
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         """Run the backbone up to the pooling layer, return flat feature vector."""
@@ -161,22 +163,33 @@ class DualHeadModel(nn.Module):
         return torch.where(use_lab, lab_preds, field_preds)
 
     @torch.no_grad()
+    def predict_routed(self, x: torch.Tensor) -> torch.Tensor:
+        """Domain-classifier routing: backbone -> domain clf -> correct head."""
+        features = self.extract_features(x)
+        domain_pred = self.domain_classifier(features).argmax(dim=1)
+        lab_out = self.head_lab(features)
+        field_out = self.head_field(features)
+        return torch.where(domain_pred == 0, lab_out.argmax(dim=1), field_out.argmax(dim=1))
+
+    @torch.no_grad()
     def predict_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """Run only the named head, return argmax predictions."""
-        lab_out, field_out = self.forward(x)
-        out = lab_out if which == "lab" else field_out
+        features = self.extract_features(x)
+        out = self.head_lab(features) if which == "lab" else self.head_field(features)
         return out.argmax(dim=1)
 
     def get_head(self, which: str) -> nn.Module:
-        """Return ``head_lab`` or ``head_field``."""
+        """Return ``head_lab``, ``head_field``, or ``domain_classifier``."""
         if which == "lab":
             return self.head_lab
         if which == "field":
             return self.head_field
-        raise ValueError(f"which must be 'lab' or 'field', got '{which}'")
+        if which == "domain":
+            return self.domain_classifier
+        raise ValueError(f"which must be 'lab', 'field', or 'domain', got '{which}'")
 
     def freeze_all_except(self, which: str) -> None:
-        """Freeze everything except the named head (and its dependencies)."""
+        """Freeze everything except the named component."""
         for param in self.parameters():
             param.requires_grad = False
         for param in self.get_head(which).parameters():

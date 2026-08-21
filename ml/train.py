@@ -37,7 +37,7 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from .data_loading import build_loaders
+from .data_loading import build_loaders, build_domain_loaders
 from .model import MODEL_FEATURE_DIMS, build_model, build_dual_head_model, DualHeadModel, head_module, unfreeze_last_blocks
 
 DEFAULT_SEED = 42
@@ -87,9 +87,10 @@ def parse_args() -> argparse.Namespace:
                         help="Sprint 8: use DualHeadModel with two independent classification "
                              "heads (head_lab + head_field) instead of a single shared head. "
                              "Eliminates catastrophic forgetting by keeping each domain separate.")
-    parser.add_argument("--train-head", default=None, choices=("lab", "field"),
-                        help="With --dual-head: which head to train (lab=PlantVillage, "
-                             "field=PlantDoc). The other head is frozen.")
+    parser.add_argument("--train-head", default=None, choices=("lab", "field", "domain"),
+                        help="With --dual-head: which component to train "
+                             "(lab=PlantVillage head, field=PlantDoc head, "
+                             "domain=domain classifier on both datasets).")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
     return parser.parse_args()
@@ -198,9 +199,112 @@ def save_checkpoint(
     )
 
 
+def train_domain_classifier(args: argparse.Namespace) -> None:
+    """Train the domain classifier on PlantVillage (lab) + PlantDoc (field)."""
+    device = _resolve_device(args.device)
+    if device.type == "cuda":
+        print(f"CUDA: {torch.cuda.get_device_name(0)}", flush=True)
+    else:
+        print("CPU only (mixed precision disabled)", flush=True)
+
+    train_loader, val_loader = build_domain_loaders(
+        args.data_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+        augment=args.augment,
+    )
+
+    from torchvision import datasets as tv_datasets
+    pv_class_names = tv_datasets.ImageFolder(str(Path(args.data_dir) / "plantvillage" / "train")).classes
+
+    model = build_dual_head_model(
+        num_classes=len(pv_class_names),
+        backbone=args.backbone,
+        pretrained=True,
+    ).to(device)
+
+    if args.init_from is not None:
+        init_ckpt = torch.load(args.init_from, map_location="cpu")
+        missing, unexpected = model.load_state_dict(init_ckpt["state_dict"], strict=False)
+        if missing:
+            print(f"Loaded with missing keys (expected for domain training): {missing}", flush=True)
+        print(f"Warm-started from {args.init_from}", flush=True)
+
+    model.freeze_all_except("domain")
+    print("Frozen backbone + head_lab + head_field; training domain_classifier only", flush=True)
+
+    model_kwargs = {"num_classes": len(pv_class_names), "backbone": args.backbone, "pretrained": True, "freeze": True}
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable params: {trainable} (domain classifier only)", flush=True)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.domain_classifier.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+
+    n_lab = len(train_loader.dataset.lab_dataset)
+    n_field = len(train_loader.dataset.field_dataset)
+    print(f"Training domain classifier on {n_lab} lab + {n_field} field images, "
+          f"{args.epochs} epochs, lr={args.lr}", flush=True)
+
+    start_epoch, best_val_acc = 1, 0.0
+    for epoch in range(start_epoch, args.epochs + 1):
+        model.train()
+        running_loss, correct, total = 0.0, 0, 0
+        for images, domain_labels in tqdm(train_loader, desc="train-domain", leave=False):
+            images, domain_labels = images.to(device), domain_labels.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            with _cuda_autocast():
+                features = model.extract_features(images)
+                domain_logits = model.domain_classifier(features)
+                loss = criterion(domain_logits, domain_labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            running_loss += loss.item() * images.size(0)
+            correct += (domain_logits.argmax(dim=1) == domain_labels).sum().item()
+            total += images.size(0)
+        train_loss, train_acc = running_loss / total, correct / total
+
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for images, domain_labels in val_loader:
+                images, domain_labels = images.to(device), domain_labels.to(device)
+                with _cuda_autocast():
+                    features = model.extract_features(images)
+                    domain_logits = model.domain_classifier(features)
+                    loss = criterion(domain_logits, domain_labels)
+                val_loss += loss.item() * images.size(0)
+                val_correct += (domain_logits.argmax(dim=1) == domain_labels).sum().item()
+                val_total += images.size(0)
+        val_loss, val_acc = val_loss / val_total, val_correct / val_total
+
+        print(f"epoch {epoch:02d}/{args.epochs}: train loss {train_loss:.4f} acc {train_acc:.4f} "
+              f"| val loss {val_loss:.4f} acc {val_acc:.4f}", flush=True)
+
+        save_checkpoint(
+            args.checkpoint_dir / f"domain_{args.tag}_epoch{epoch:02d}.pt",
+            model, optimizer, scaler, epoch, val_acc, pv_class_names, model_kwargs,
+        )
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            save_checkpoint(
+                args.checkpoint_dir / f"best_domain_{args.tag}.pt",
+                model, optimizer, scaler, epoch, val_acc, pv_class_names, model_kwargs,
+            )
+
+    print(f"Done. Best domain val acc {best_val_acc:.4f}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+
+    if args.dual_head and args.train_head == "domain":
+        train_domain_classifier(args)
+        return
     device = _resolve_device(args.device)
     if device.type == "cuda":
         print(f"CUDA: {torch.cuda.get_device_name(0)}", flush=True)
@@ -241,7 +345,7 @@ def main() -> None:
                 f"init checkpoint classes ({len(init_ckpt['class_names'])}) differ from "
                 f"current dataset classes ({len(class_names)})"
             )
-        model.load_state_dict(init_ckpt["state_dict"])
+        model.load_state_dict(init_ckpt["state_dict"], strict=False)
         print(f"Warm-started weights from {args.init_from}", flush=True)
         if dual_head_mode and args.train_head is not None:
             if args.train_head == "field":
