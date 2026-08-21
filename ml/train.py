@@ -91,6 +91,9 @@ def parse_args() -> argparse.Namespace:
                         help="With --dual-head: which component to train "
                              "(lab=PlantVillage head, field=PlantDoc head, "
                              "domain=domain classifier on both datasets).")
+    parser.add_argument("--backbone-lr", type=float, default=0.0,
+                        help="Sprint 8: learning rate for backbone params during dual-head training. "
+                             "0=frozen (default); 1e-5 to unfreeze backbone at low LR for domain adaptation.")
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader workers")
     return parser.parse_args()
@@ -330,9 +333,13 @@ def main() -> None:
             backbone=args.backbone,
             pretrained=True,
         ).to(device)
-        if args.train_head is not None:
+        if dual_head_mode and args.train_head is not None:
             model.freeze_all_except(args.train_head)
             print(f"DualHead: training head_{args.train_head}, other head frozen", flush=True)
+            if args.backbone_lr > 0 and args.train_head != "domain":
+                for p in model.backbone.parameters():
+                    p.requires_grad = True
+                print(f"DualHead: backbone UNFROZEN for domain adaptation (backbone_lr={args.backbone_lr})", flush=True)
         dual_head_mode = True
     else:
         model = build_model(**model_kwargs).to(device)
@@ -353,6 +360,10 @@ def main() -> None:
                 print("Copied head_lab -> head_field (warm-start field head from lab head)", flush=True)
             model.freeze_all_except(args.train_head)
             print(f"DualHead: re-froze after init, training head_{args.train_head}", flush=True)
+            if args.backbone_lr > 0 and args.train_head != "domain":
+                for p in model.backbone.parameters():
+                    p.requires_grad = True
+                print(f"DualHead: backbone UNFROZEN for domain adaptation (backbone_lr={args.backbone_lr})", flush=True)
 
     if not dual_head_mode and args.unfreeze_blocks > 0:
         unfreeze_last_blocks(model, args.unfreeze_blocks)
@@ -374,7 +385,7 @@ def main() -> None:
         ]
     optimizer = torch.optim.Adam(
         [
-            {"params": backbone_params, "lr": args.lr},
+            {"params": backbone_params, "lr": args.backbone_lr if args.backbone_lr > 0 else args.lr},
             {"params": head_params, "lr": args.head_lr or args.lr},
         ],
         weight_decay=args.weight_decay,
@@ -403,6 +414,7 @@ def main() -> None:
     print(f"Training {mode} on {dataset_label} ({len(train_loader.dataset)} train images, "
           f"{len(class_names)} classes), {args.epochs} epochs, "
           f"backbone={args.backbone}, lr={args.lr}, head_lr={args.head_lr or args.lr}, "
+          f"backbone_lr={args.backbone_lr}, "
           f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, active_head=args.train_head)
