@@ -81,6 +81,9 @@ def parse_args() -> argparse.Namespace:
                              "is re-run with it")
     parser.add_argument("--dual-head", action="store_true",
                         help="Sprint 8: load a DualHeadModel checkpoint")
+    parser.add_argument("--separate-backbones", action="store_true",
+                        help="Sprint 9: DualHeadModel trained with separate backbones "
+                             "(backbone_lab + backbone_field). Inferred from checkpoint if omitted.")
     parser.add_argument("--predict-mode", default="routed", choices=("routed", "dual"),
                         help="Sprint 8: 'routed' uses domain classifier to route to the "
                              "correct head (default); 'dual' uses confidence-race fallback")
@@ -222,14 +225,17 @@ def main() -> None:
         raise ValueError("--eval-head requires --dual-head")
 
     if args.dual_head:
+        separate = args.separate_backbones or ckpt["model_kwargs"].get("separate_backbones", False)
         model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
             backbone=ckpt["model_kwargs"]["backbone"],
+            separate_backbones=separate,
         )
         missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
         if missing:
             print(f"Note: missing keys (expected for older checkpoints): {missing}", flush=True)
-        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
+        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']} "
+              f"(separate_backbones={separate})", flush=True)
     else:
         model = build_model(**ckpt["model_kwargs"])
         model.load_state_dict(ckpt["state_dict"])

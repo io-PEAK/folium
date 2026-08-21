@@ -87,6 +87,10 @@ def parse_args() -> argparse.Namespace:
                         help="Sprint 8: use DualHeadModel with two independent classification "
                              "heads (head_lab + head_field) instead of a single shared head. "
                              "Eliminates catastrophic forgetting by keeping each domain separate.")
+    parser.add_argument("--separate-backbones", action="store_true",
+                        help="Sprint 9: give each head its OWN backbone (backbone_lab + "
+                             "backbone_field) instead of one shared backbone. Eliminates the "
+                             "shared-backbone interference that capped the field head at 0.41.")
     parser.add_argument("--train-head", default=None, choices=("lab", "field", "domain"),
                         help="With --dual-head: which component to train "
                              "(lab=PlantVillage head, field=PlantDoc head, "
@@ -225,6 +229,7 @@ def train_domain_classifier(args: argparse.Namespace) -> None:
         num_classes=len(pv_class_names),
         backbone=args.backbone,
         pretrained=True,
+        separate_backbones=args.separate_backbones,
     ).to(device)
 
     if args.init_from is not None:
@@ -237,7 +242,8 @@ def train_domain_classifier(args: argparse.Namespace) -> None:
     model.freeze_all_except("domain")
     print("Frozen backbone + head_lab + head_field; training domain_classifier only", flush=True)
 
-    model_kwargs = {"num_classes": len(pv_class_names), "backbone": args.backbone, "pretrained": True, "freeze": True}
+    model_kwargs = {"num_classes": len(pv_class_names), "backbone": args.backbone, "pretrained": True,
+                     "freeze": True, "separate_backbones": args.separate_backbones}
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable params: {trainable} (domain classifier only)", flush=True)
@@ -325,19 +331,22 @@ def main() -> None:
         mix_with=args.mix_with,
         plantdoc_repeat=args.plantdoc_repeat,
     )
-    model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True, "freeze": True}
+    model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True,
+                     "freeze": True, "separate_backbones": args.separate_backbones}
 
     if args.dual_head:
         model = build_dual_head_model(
             num_classes=len(class_names),
             backbone=args.backbone,
             pretrained=True,
+            separate_backbones=args.separate_backbones,
         ).to(device)
         if args.train_head is not None:
             model.freeze_all_except(args.train_head)
             print(f"DualHead: training head_{args.train_head}, other head frozen", flush=True)
             if args.backbone_lr > 0 and args.train_head != "domain":
-                for p in model.backbone.parameters():
+                target = model.backbone_field if getattr(model, "separate_backbones", False) else model.backbone
+                for p in target.parameters():
                     p.requires_grad = True
                 print(f"DualHead: backbone UNFROZEN for domain adaptation (backbone_lr={args.backbone_lr})", flush=True)
         dual_head_mode = True
@@ -357,11 +366,16 @@ def main() -> None:
         if dual_head_mode and args.train_head is not None:
             if args.train_head == "field":
                 model.head_field.load_state_dict(model.head_lab.state_dict())
-                print("Copied head_lab -> head_field (warm-start field head from lab head)", flush=True)
+                if getattr(model, "separate_backbones", False):
+                    model.backbone_field.load_state_dict(model.backbone_lab.state_dict())
+                    print("Copied backbone_lab+head_lab -> backbone_field+head_field (warm start)", flush=True)
+                else:
+                    print("Copied head_lab -> head_field (warm-start field head from lab head)", flush=True)
             model.freeze_all_except(args.train_head)
             print(f"DualHead: re-froze after init, training head_{args.train_head}", flush=True)
             if args.backbone_lr > 0 and args.train_head != "domain":
-                for p in model.backbone.parameters():
+                target = model.backbone_field if getattr(model, "separate_backbones", False) else model.backbone
+                for p in target.parameters():
                     p.requires_grad = True
                 print(f"DualHead: backbone UNFROZEN for domain adaptation (backbone_lr={args.backbone_lr})", flush=True)
 

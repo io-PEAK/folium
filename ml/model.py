@@ -113,40 +113,63 @@ def trainable_parameters(model: nn.Module):
 
 
 class DualHeadModel(nn.Module):
-    """Backbone with two independent classification heads (Sprint 8).
+    """Backbone with two independent classification heads (Sprint 8/9).
 
     Solves the lab-vs-field catastrophic forgetting: each head trains on its
     own domain and never sees the other.  A lightweight domain classifier
     routes each image to the correct head at inference time.
 
-    Architecture::
+    When ``separate_backbones=True`` (Sprint 9), each head gets its OWN
+    backbone — this eliminates the shared-backbone interference that capped
+    the field head at 0.41 in Sprint 8 (Sprint 8 proved the bottleneck is the
+    backbone, not the head). The domain classifier runs on the lab backbone's
+    features (more stable, trained on more data).
 
-        backbone (shared, frozen)
-          ├── head_lab          -> trained on PlantVillage only
-          ├── head_field        -> trained on PlantDoc only
-          └── domain_classifier -> trained on both (lab=0, field=1)
+    Architecture (separate_backbones=True)::
+
+        backbone_lab   (PV-trained)    -> head_lab
+        backbone_field (PD-adapted)    -> head_field
+        domain_classifier (on backbone_lab features) -> lab=0 / field=1
     """
 
-    def __init__(self, backbone: nn.Module, in_features: int, num_classes: int, backbone_name: str):
+    def __init__(self, backbone: nn.Module, in_features: int, num_classes: int, backbone_name: str, separate_backbones: bool = False):
         super().__init__()
-        self.backbone = backbone
         self.backbone_name = backbone_name
         self.in_features = in_features
         self.num_classes = num_classes
+        self.separate_backbones = separate_backbones
+
+        if separate_backbones:
+            self.backbone_lab = backbone
+            # backbone_field is attached by build_dual_head_model after __init__
+        else:
+            self.backbone = backbone
 
         self.head_lab = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
         self.head_field = nn.Sequential(nn.Dropout(0.1), nn.Linear(in_features, num_classes))
         self.domain_classifier = nn.Linear(in_features, 2)
 
-    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the backbone up to the pooling layer, return flat feature vector."""
-        x = self.backbone(x)
+    def _features(self, x: torch.Tensor, which: str) -> torch.Tensor:
+        """Run the appropriate backbone, return flat feature vector."""
+        if self.separate_backbones:
+            bb = self.backbone_lab if which == "lab" else self.backbone_field
+        else:
+            bb = self.backbone
+        x = bb(x)
         return torch.flatten(x, 1)
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the lab backbone (used by the domain classifier)."""
+        return self._features(x, "lab")
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (lab_logits, field_logits)."""
-        features = self.extract_features(x)
-        return self.head_lab(features), self.head_field(features)
+        if self.separate_backbones:
+            lab_feat = self._features(x, "lab")
+            field_feat = self._features(x, "field")
+            return self.head_lab(lab_feat), self.head_field(field_feat)
+        feat = self._features(x, "shared")
+        return self.head_lab(feat), self.head_field(feat)
 
     @torch.no_grad()
     def predict_dual(self, x: torch.Tensor) -> torch.Tensor:
@@ -165,17 +188,24 @@ class DualHeadModel(nn.Module):
     @torch.no_grad()
     def predict_routed(self, x: torch.Tensor) -> torch.Tensor:
         """Domain-classifier routing: backbone -> domain clf -> correct head."""
-        features = self.extract_features(x)
-        domain_pred = self.domain_classifier(features).argmax(dim=1)
-        lab_out = self.head_lab(features)
-        field_out = self.head_field(features)
+        if self.separate_backbones:
+            lab_feat = self._features(x, "lab")
+            domain_pred = self.domain_classifier(lab_feat).argmax(dim=1)
+            field_feat = self._features(x, "field")
+            lab_out = self.head_lab(lab_feat)
+            field_out = self.head_field(field_feat)
+            return torch.where(domain_pred == 0, lab_out.argmax(dim=1), field_out.argmax(dim=1))
+        feat = self.extract_features(x)
+        domain_pred = self.domain_classifier(feat).argmax(dim=1)
+        lab_out = self.head_lab(feat)
+        field_out = self.head_field(feat)
         return torch.where(domain_pred == 0, lab_out.argmax(dim=1), field_out.argmax(dim=1))
 
     @torch.no_grad()
     def predict_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """Run only the named head, return argmax predictions."""
-        features = self.extract_features(x)
-        out = self.head_lab(features) if which == "lab" else self.head_field(features)
+        feat = self._features(x, which)
+        out = self.head_lab(feat) if which == "lab" else self.head_field(feat)
         return out.argmax(dim=1)
 
     def get_head(self, which: str) -> nn.Module:
@@ -192,34 +222,61 @@ class DualHeadModel(nn.Module):
         """Freeze everything except the named component."""
         for param in self.parameters():
             param.requires_grad = False
-        for param in self.get_head(which).parameters():
-            param.requires_grad = True
+        if which == "domain":
+            for param in self.domain_classifier.parameters():
+                param.requires_grad = True
+        elif which == "lab":
+            if self.separate_backbones:
+                for param in self.backbone_lab.parameters():
+                    param.requires_grad = True
+            for param in self.head_lab.parameters():
+                param.requires_grad = True
+        elif which == "field":
+            if self.separate_backbones:
+                for param in self.backbone_field.parameters():
+                    param.requires_grad = True
+            for param in self.head_field.parameters():
+                param.requires_grad = True
+        else:
+            raise ValueError(f"which must be 'lab', 'field', or 'domain', got '{which}'")
 
 
 def build_dual_head_model(
     num_classes: int,
     backbone: str = "resnet50",
     pretrained: bool = True,
+    separate_backbones: bool = False,
 ) -> DualHeadModel:
-    """Build a ``DualHeadModel`` with a frozen backbone and two fresh heads."""
+    """Build a ``DualHeadModel``.
+
+    With ``separate_backbones=False`` (Sprint 8): one frozen backbone shared by
+    both heads. With ``separate_backbones=True`` (Sprint 9): two independent
+    backbones, each trained on its own domain — eliminates shared-backbone
+    interference so the field head can reach the PlantDoc ceiling (~0.66).
+    """
     if backbone not in MODEL_FEATURE_DIMS:
         raise ValueError(f"Unsupported backbone '{backbone}'; choose from {sorted(MODEL_FEATURE_DIMS)}")
 
-    raw = getattr(models, backbone)(weights=_pretrained_weights(backbone) if pretrained else None)
-
-    # Freeze backbone
-    for param in raw.parameters():
-        param.requires_grad = False
-
-    # Strip the original head — keep only the feature-extraction path
     in_features = MODEL_FEATURE_DIMS[backbone]
-    if "resnet" in backbone:
-        feature_backbone = nn.Sequential(
-            raw.conv1, raw.bn1, raw.relu, raw.maxpool,
-            raw.layer1, raw.layer2, raw.layer3, raw.layer4,
-            raw.avgpool,
-        )
-    else:
-        feature_backbone = raw.features
 
-    return DualHeadModel(feature_backbone, in_features, num_classes, backbone)
+    def make_feature_backbone() -> nn.Module:
+        raw = getattr(models, backbone)(weights=_pretrained_weights(backbone) if pretrained else None)
+        for param in raw.parameters():
+            param.requires_grad = False
+        if "resnet" in backbone:
+            return nn.Sequential(
+                raw.conv1, raw.bn1, raw.relu, raw.maxpool,
+                raw.layer1, raw.layer2, raw.layer3, raw.layer4,
+                raw.avgpool,
+            )
+        return raw.features
+
+    if separate_backbones:
+        backbone_lab = make_feature_backbone()
+        backbone_field = make_feature_backbone()
+        model = DualHeadModel(backbone_lab, in_features, num_classes, backbone, separate_backbones=True)
+        model.backbone_field = backbone_field
+        return model
+
+    feature_backbone = make_feature_backbone()
+    return DualHeadModel(feature_backbone, in_features, num_classes, backbone, separate_backbones=False)

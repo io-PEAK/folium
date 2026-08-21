@@ -850,3 +850,112 @@ the backbone's capacity — it was the shared head being overwritten. Two heads 
    Order matters: field training doesn't touch head_lab, so lab quality is preserved.
 6. How does `--init-from` work with dual-head? → loads the full state_dict (both heads), then
    `freeze_all_except("field")` re-freezes everything except the head being trained.
+
+## Phase 8 — Sprint 9: Dual-Head with Separate Backbones (in progress, 2026-08-21)
+
+**What this sprint solves:** Sprint 8 proved the bottleneck is the *shared backbone*, not the
+head. With one frozen backbone, the field head capped at 0.41. The fix: give each head its OWN
+backbone (`backbone_lab` + `backbone_field`). No shared backbone = no interference.
+
+**Architecture (separate backbones):**
+```
+backbone_lab   (PV-trained, frozen)  -> head_lab
+backbone_field (PD-adapted, trained) -> head_field
+domain_classifier (on backbone_lab features) -> lab=0 / field=1
+```
+
+**Training flow:**
+1. Step 4: train `backbone_lab` + `head_lab` on PlantVillage (5 epochs)
+2. Step 5: warm-start `backbone_field` + `head_field` from lab checkpoint, train on PlantDoc (10 epochs)
+3. Step 6: train `domain_classifier` on PV (label 0) + PD (label 1) features (3 epochs)
+4. Step 7: t-SNE of backbone_lab features → shows lab/field clusters (domain shift figure)
+5. Step 8: label audit of PlantDoc (noise figure)
+6. Step 9: evaluate per-head + routed + dual
+7. Step 10: verdict (both gates)
+
+**Code changes:**
+- `ml/model.py`: `DualHeadModel` now takes `separate_backbones` flag. When True, has
+  `backbone_lab` + `backbone_field` instead of single `backbone`. `freeze_all_except("lab")`
+  unfreezes `backbone_lab` + `head_lab`; `freeze_all_except("field")` unfreezes
+  `backbone_field` + `head_field`. `predict_routed` runs `backbone_lab` → domain clf → routes
+  to the correct backbone+head.
+- `ml/train.py`: `--separate-backbones` flag; warm-start copies `backbone_lab` → `backbone_field`
+  AND `head_lab` → `head_field`; `model_kwargs` stores `separate_backbones`.
+- `ml/evaluate.py`: `--separate-backbones` flag; inferred from checkpoint `model_kwargs`.
+- `scripts/audit_plantdoc_labels.py`: `--separate-backbones` flag; uses `predict_head("field")`.
+- `notebooks/sprint9_two_backbone.ipynb`: new notebook with t-SNE + label audit cells.
+
+**Expected results:** lab ~0.94-0.96, field ~0.66 (PlantDoc ceiling from Sprint 7
+`both_resnet50`). Both above 0.60 gates.
+
+**Logical chain for the paper:**
+- Finding: lab-trained models fail on field photos due to domain shift; a single shared backbone
+  cannot encode both domains (proven across 3 backbones + dual-head shared-backbone).
+- Solution: separate backbones per domain (or two-stage training) decouples the adaptation.
+- Disease classification: final model classifies all 38 diseases on ANY leaf image.
+
+**Root cause (final answer):** It is NOT the backbone capacity (3 backbones all show the same
+trade-off) and NOT purely the dataset (both_resnet50 hit 0.66 on the same PlantDoc data). The
+bottleneck is the **domain shift + shared-backbone tension**: the backbone features are optimized
+for lab photos, so field images need backbone adaptation — but a single shared backbone adapting
+to field shifts features away from lab. Separate backbones remove the tension entirely.
+
+### Sprint 8 results and findings (real runs)
+
+**Run 1 — frozen backbone, predict_dual (v1 baseline):**
+
+| variant | Lab F1 | Field F1 |
+|---|---|---|
+| s8_lab_on_plantvillage | 0.9360 | — |
+| s8_field_on_plantdoc | — | 0.4094 |
+| s8_routed (domain clf) | 0.9349 | 0.3512 |
+| s8_dual (confidence race) | 0.9093 | 0.2976 |
+
+**Bug found — predict_dual() was broken.** Both heads ran on ALL samples. The field head
+(200 PlantDoc images, overfit) produced spuriously high softmax confidence on PlantVillage
+images, overriding the lab head's correct predictions. Lab F1 dropped from 0.936 to 0.909
+(dual) vs 0.936 (per-head). Fix: added `predict_head()` for per-head evaluation and
+`predict_routed()` via domain classifier.
+
+**Run 2 — backbone-lr=1e-5 (domain adaptation):**
+
+| variant | Lab F1 | Field F1 |
+|---|---|---|
+| s8_lab_on_plantvillage | 0.8848 | — |
+| s8_field_on_plantdoc | — | 0.4372 |
+| s8_routed (domain clf) | 0.8844 | 0.3728 |
+
+**Finding: backbone unfreezing hurts lab without helping field.** Unfreezing the backbone
+at lr=1e-5 during field training adapted features away from PlantVillage (lab dropped 0.94→0.88)
+while barely improving field (0.41→0.44). The shared backbone creates a fundamental tension:
+any adaptation for one domain degrades the other.
+
+**Key learnings:**
+1. **predict_dual confidence-race is unreliable.** The overfit field head can produce higher
+   softmax confidence than the well-calibrated lab head on lab images. Always evaluate per-head.
+2. **Domain classifier routing works correctly.** Routed scores (0.93 lab, 0.35 field) are close
+   to per-head scores (0.94 lab, 0.41 field). The gap in field (0.41→0.35) is from occasional
+   misrouting, not head weakness.
+3. **Shared frozen backbone limits field head to ~0.41.** The backbone features are optimized
+   for PlantVillage; the field head can only learn linear boundaries on those features. This is
+   the same constraint as Sprint 7's mixed training — the backbone, not the head, is the bottleneck.
+4. **Backbone unfreezing creates interference.** Both heads share the same backbone. Adapting
+   it for PlantDoc degrades PlantVillage features. This is the fundamental limitation of the
+   dual-head architecture with a shared backbone.
+5. **Warm-start from lab head helps marginally.** Copying head_lab weights to head_field before
+   training gave field 0.41 vs random init's ~0.35. The head starts with disease-discriminative
+   weights, but the features are wrong for field images.
+
+**What would fix it (not tried due to Drive storage):**
+- Separate backbones per head (eliminates interference, doubles memory)
+- Alternating training: lab→field (backbone-lr)→retrain lab (frozen)
+- Label cleaning: PlantDoc's crowd-sourced labels may cap the field ceiling
+
+**Architecture added:**
+- `DualHeadModel`: shared backbone + head_lab + head_field + domain_classifier
+- `predict_head(name)`: evaluate one head in isolation
+- `predict_routed()`: domain classifier routes to correct head
+- `predict_dual()`: confidence-race (kept for comparison, deprecated for production)
+- `--train-head domain`: trains domain classifier on PV+PD
+- `--backbone-lr`: unfreezes backbone at low LR for domain adaptation
+- `_DomainDataset` + `build_domain_loaders()`: PV=label 0, PD=label 1

@@ -48,8 +48,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
     parser.add_argument("--dual-head", action="store_true",
-                        help="Load a DualHeadModel checkpoint and use predict_dual() "
-                             "to pick the higher-confidence head per sample")
+                        help="Load a DualHeadModel checkpoint and use predict_head('field') "
+                             "to score PlantDoc images with the field head")
+    parser.add_argument("--separate-backbones", action="store_true",
+                        help="Sprint 9: DualHeadModel trained with separate backbones")
     return parser.parse_args()
 
 
@@ -62,12 +64,14 @@ def main() -> None:
     class_names = ckpt["class_names"]
 
     if args.dual_head:
+        separate = args.separate_backbones or ckpt["model_kwargs"].get("separate_backbones", False)
         model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
             backbone=ckpt["model_kwargs"]["backbone"],
+            separate_backbones=separate,
         )
-        model.load_state_dict(ckpt["state_dict"])
-        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']}", flush=True)
+        model.load_state_dict(ckpt["state_dict"], strict=False)
+        print(f"DualHeadModel loaded: {ckpt['model_kwargs']['backbone']} (separate={separate})", flush=True)
     else:
         model = build_model(**ckpt["model_kwargs"])
         model.load_state_dict(ckpt["state_dict"])
@@ -88,15 +92,12 @@ def main() -> None:
         images = images.to(device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
             if args.dual_head:
-                pred_tensor = model.predict_dual(images)
+                pred_tensor = model.predict_head(images, "field")
                 preds.extend(pred_tensor.cpu().tolist())
-                lab_out, field_out = model(images)
-                lab_probs = torch.softmax(lab_out, dim=1)
+                field_feat = model._features(images, "field")
+                field_out = model.head_field(field_feat)
                 field_probs = torch.softmax(field_out, dim=1)
-                lab_conf = lab_probs.max(dim=1).values
-                field_conf = field_probs.max(dim=1).values
-                conf = torch.where(lab_conf >= field_conf, lab_conf, field_conf)
-                probs.extend(conf.cpu().tolist())
+                probs.extend(field_probs.max(dim=1).values.cpu().tolist())
             else:
                 sm = torch.softmax(model(images), dim=1)
                 preds.extend(sm.argmax(dim=1).cpu().tolist())
