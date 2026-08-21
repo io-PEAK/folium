@@ -82,6 +82,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dual-head", action="store_true",
                         help="Sprint 8: load a DualHeadModel checkpoint and use predict_dual() "
                              "to pick the higher-confidence head per sample")
+    parser.add_argument("--eval-head", default=None, choices=("lab", "field"),
+                        help="Sprint 8: evaluate only one head (lab or field) instead of "
+                             "predict_dual. Use this to measure each head's true score "
+                             "without the other head overriding predictions.")
     args = parser.parse_args()
     if args.confusion_path is None:
         stem = "".join(c if c.isalnum() or c in "._-" else "_" for c in args.variant)
@@ -90,13 +94,15 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False, dual_head: bool = False):
+def predict_all(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device, tta: bool = False, dual_head: bool = False, eval_head: str | None = None):
     model.eval()
     all_preds, all_labels = [], []
     for images, labels in tqdm(loader, desc="eval", leave=False):
         images = images.to(device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            if dual_head:
+            if eval_head is not None:
+                preds = model.predict_head(images, eval_head)
+            elif dual_head:
                 preds = model.predict_dual(images)
             else:
                 probs = torch.softmax(model(images), dim=1)
@@ -209,6 +215,9 @@ def main() -> None:
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
+    if args.eval_head and not args.dual_head:
+        parser.error("--eval-head requires --dual-head")
+
     if args.dual_head:
         model = build_dual_head_model(
             num_classes=ckpt["model_kwargs"]["num_classes"],
@@ -231,7 +240,9 @@ def main() -> None:
     loader = {"train": train_loader, "val": val_loader, "test": test_loader}[args.split]
 
     class_names = ckpt["class_names"]
-    preds, labels = predict_all(model, loader, device, tta=args.tta, dual_head=args.dual_head)
+    if args.eval_head:
+        print(f"Evaluating only head_{args.eval_head} (no predict_dual)", flush=True)
+    preds, labels = predict_all(model, loader, device, tta=args.tta, dual_head=args.dual_head, eval_head=args.eval_head)
     acc = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="macro", zero_division=0)
 

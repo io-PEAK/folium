@@ -160,6 +160,13 @@ class DualHeadModel(nn.Module):
         field_preds = field_out.argmax(dim=1)
         return torch.where(use_lab, lab_preds, field_preds)
 
+    @torch.no_grad()
+    def predict_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
+        """Run only the named head, return argmax predictions."""
+        lab_out, field_out = self.forward(x)
+        out = lab_out if which == "lab" else field_out
+        return out.argmax(dim=1)
+
     def get_head(self, which: str) -> nn.Module:
         """Return ``head_lab`` or ``head_field``."""
         if which == "lab":

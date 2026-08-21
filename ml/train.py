@@ -244,6 +244,9 @@ def main() -> None:
         model.load_state_dict(init_ckpt["state_dict"])
         print(f"Warm-started weights from {args.init_from}", flush=True)
         if dual_head_mode and args.train_head is not None:
+            if args.train_head == "field":
+                model.head_field.load_state_dict(model.head_lab.state_dict())
+                print("Copied head_lab -> head_field (warm-start field head from lab head)", flush=True)
             model.freeze_all_except(args.train_head)
             print(f"DualHead: re-froze after init, training head_{args.train_head}", flush=True)
 
