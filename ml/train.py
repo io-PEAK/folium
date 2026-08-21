@@ -333,7 +333,7 @@ def main() -> None:
             backbone=args.backbone,
             pretrained=True,
         ).to(device)
-        if dual_head_mode and args.train_head is not None:
+        if args.train_head is not None:
             model.freeze_all_except(args.train_head)
             print(f"DualHead: training head_{args.train_head}, other head frozen", flush=True)
             if args.backbone_lr > 0 and args.train_head != "domain":
