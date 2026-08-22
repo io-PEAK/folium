@@ -959,3 +959,62 @@ any adaptation for one domain degrades the other.
 - `--train-head domain`: trains domain classifier on PV+PD
 - `--backbone-lr`: unfreezes backbone at low LR for domain adaptation
 - `_DomainDataset` + `build_domain_loaders()`: PV=label 0, PD=label 1
+
+### Sprint 9 results and findings (real runs, 2026-08-22)
+
+**Architecture:** separate backbones (backbone_lab + backbone_field), each head gets its own
+backbone. backbone_lab trained on PV only (5 epochs); backbone_field warm-started from lab then
+trained on PD only (10 epochs); domain classifier trained on PV+PD features (3 epochs).
+
+**Results:**
+
+| variant | Lab F1 | Field F1 |
+|---|---|---|
+| s9_lab_on_plantvillage | 0.9554 | — |
+| s9_field_on_plantdoc | — | 0.4204 |
+| s9_routed_plantvillage | 0.9542 | — |
+| s9_routed_plantdoc | — | 0.2952 |
+| s9_dual_plantvillage | 0.9422 | — |
+| s9_dual_plantdoc | — | 0.3075 |
+
+**Verdict:** field 0.4204 < 0.60 FAIL | lab 0.9554 >= 0.85 PASS
+
+**Key finding: separate backbones did NOT help.** The field head with its own backbone
+trained on PD still gets 0.42 — identical to the shared frozen backbone (0.41 in Sprint 8).
+This PROVES the bottleneck is NOT backbone interference between heads. The problem is that
+**a backbone trained on PD alone cannot learn good features** because:
+1. PD is too small (~1300 train images vs ~8000 PV images)
+2. PD labels are noisy (crowd-sourced, mislabeled images)
+3. A ResNet-50 backbone needs more clean, well-labeled data than PD provides
+
+**Why both_resnet50 hit 0.66 on field:** that model trained the backbone on BOTH PV+PD
+combined, not PD-only. The clean PV data provided enough signal for the backbone to learn
+good features, while PD data provided field-domain adaptation. PD alone is insufficient.
+
+### Complete landscape (all sprints combined)
+
+| Approach | Field F1 | Lab F1 | Both pass? |
+|---|---|---|---|
+| Single head on PV only | 0.00 | 0.96 | No |
+| Single head on PV+PD (v13) | 0.42 | 0.96 | No |
+| Single head on PV+PD x8 | 0.47 | 0.95 | No |
+| both_resnet50 (field specialist) | **0.66** | 0.29 | No |
+| Dual-head shared frozen (S8) | 0.41 | 0.94 | No |
+| Dual-head shared backbone-lr (S8) | 0.44 | 0.88 | No |
+| Separate backbones (S9) | 0.42 | 0.96 | No |
+| Domain-routed (S8/S9) | 0.29-0.35 | 0.93-0.95 | No |
+
+**No approach has ever passed both gates (field >=0.60 AND lab >=0.85).**
+
+Every model that keeps lab >=0.85 caps field at ~0.42-0.47. The only approach that hits
+field >=0.60 (both_resnet50) destroys lab. This is a domain adaptation problem, not an
+architecture problem. The PlantVillage and PlantDoc feature distributions are fundamentally
+different — a model optimized for one domain cannot classify the other without adaptation.
+
+**Root cause (confirmed across 5 sprints):**
+1. NOT backbone capacity (3 backbones show same trade-off)
+2. NOT shared-head interference (separate backbones gave same result)
+3. NOT training recipe (dual-head, separate-backbones, domain classifier all fail)
+4. IS domain shift: lab photos (clean, bright, consistent) vs field photos (noisy, variable
+   lighting/angles/backgrounds) have incompatible feature distributions
+5. IS data insufficiency: PD alone (~1300 images) is too small/noisy to train a backbone
