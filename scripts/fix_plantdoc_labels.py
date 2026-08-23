@@ -146,7 +146,7 @@ def main():
     class_map_path = data_dir / "class_map.json"
     if class_map_path.exists():
         with open(class_map_path) as f:
-            class_map = json.load(f)
+            class_map = json.load(f)["plantdoc_to_plantvillage"]
         # Invert: PV class name -> PD folder name
         pv_to_pd_folder = {v: k for k, v in class_map.items()}
     else:
