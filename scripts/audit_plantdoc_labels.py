@@ -58,7 +58,10 @@ def parse_args() -> argparse.Namespace:
 @torch.no_grad()
 def main() -> None:
     args = parse_args()
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device)
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     class_names = ckpt["class_names"]
