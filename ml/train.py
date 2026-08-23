@@ -332,7 +332,7 @@ def main() -> None:
         plantdoc_repeat=args.plantdoc_repeat,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True,
-                     "freeze": True, "separate_backbones": args.separate_backbones}
+                     "freeze": True}
 
     if args.dual_head:
         model = build_dual_head_model(
