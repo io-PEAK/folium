@@ -1154,3 +1154,36 @@ Applied via `fix_plantdoc_labels.py --exclude tomato_bacterial-speck` → 7 file
 Delta: **+0.0287** from correcting just 7/230 labels (3%). Slightly under the +0.04–0.06 estimate —
 consistent with macro-F1 weighting and 2 of the 7 being Corn GLS→blight moves that swap one class
 pair rather than fixing pure errors. Every subsequent evaluation uses the corrected test set.
+
+**The 7 verified moves** (also in `results/s10_label_fixes.csv` on Drive):
+
+| # | From | To | File | conf |
+|---|---|---|---|---|
+| 1 | Corn leaf blight | Corn Gray leaf spot | `0796.20graylssymt.jpg` | 0.810 |
+| 2 | Corn Gray leaf spot | Corn leaf blight | `IMG_42231.jpg` | 0.916 |
+| 3 | Corn leaf blight | Corn Gray leaf spot | `corn-gray-leaf-spot-f4.jpg` | 0.943 |
+| 4 | Corn leaf blight | Corn Gray leaf spot | `1321189.jpg` | 0.957 |
+| 5 | Potato leaf late blight | Potato leaf early blight | `1421_0.jpeg?itok=FMtmgePj.jpg` | 0.957 |
+| 6 | Corn leaf blight | Corn Gray leaf spot | `corn-disease-update-fig-3-gray-leaf-spot.jpg` | 0.970 |
+| 7 | Corn leaf blight | Corn Gray leaf spot | `2013Corn_GrayLeafSpot_0815_0003.JPG.jpg` | 0.973 |
+
+Rejected: `Tomato leaf bacterial spot/tomato_bacterial-speck_01_zoom.jpg` -> early blight (0.966).
+
+### Label-fix methodology lessons (Sprint 10)
+
+1. **Disagreement type decides what an audit finding means.** Cross-species disagreements
+   (apple→tomato, corn→grape) at ANY confidence are MODEL failures, never label candidates.
+   Only same-species, high-confidence (>0.80) disagreements qualify as possible mislabels —
+   and even then human verification is mandatory.
+2. **High model confidence is necessary but NOT sufficient.** The one rejected candidate had
+   0.966 model confidence and was still wrong (image showed bacterial-spot specks with yellow
+   halos, not early-blight bullseyes). Confidence measures pattern-match strength, not truth.
+3. **Source filenames are powerful free evidence.** PlantDoc files keep their collectors'
+   names (`corn-gray-leaf-spot-f4.jpg`, `2013Corn_GrayLeafSpot...`) — 5 of our 7 accepted fixes
+   were self-documenting. Always check filename metadata before/instead of eyeballing.
+4. **The audit's console output lies by omission.** "Top suspicious" lists lowest-confidence
+   rows = worst model failures. Real candidates sit at the opposite end of the CSV; the fix
+   script's three-gate filter is where to look, not the printed highlights.
+5. **Persist verified fixes as data, not procedure.** Replaying `s10_label_fixes.csv`
+   (Step 3b cell) beats re-running audit+dry-run+review each session: deterministic,
+   instant, immune to checkpoint changes that would shift a fresh audit's output.
