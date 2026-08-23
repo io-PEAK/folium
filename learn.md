@@ -1080,3 +1080,54 @@ unfrozen backbone + mixed PV+PD training with tunable ratio.
 
 **If both pass:** take that checkpoint, go to frontend.
 **If not:** report results, decide next steps.
+
+### Sprint 10 segmentation diagnostic results (real runs, 2026-08-23)
+
+**Step 8 - Segmented vs original PlantDoc test (mixed checkpoint):**
+
+| variant | F1 |
+|---|---|
+| s10_orig_mixed_field (original PD) | 0.4107 |
+| s10_seg_mixed_field (GrabCut-segmented PD) | **0.2671** |
+
+Delta: **−0.1436** — far outside the ±0.03–0.05 noise band. Removing backgrounds made the model
+WORSE. Lab sanity held (0.9589), so nothing broke mechanically.
+
+**Step 9b - Official segmented PlantVillage baseline:** the Drive archive only contains raw/color,
+so we sparse-cloned the official spMohanty/PlantVillage-Dataset repo (raw/segmented only) and matched
+files to OUR test split by the text after `___` with `_final_masked` stripped (segmented files use
+different UUIDs than color files — exact-name matching copies zero files).
+
+| variant | F1 |
+|---|---|
+| s10_orig_mixed_lab (original PV) | 0.9589 |
+| s10_pv_seg_baseline (official segmented PV) | **0.6672** |
+
+Delta: **−0.2917** — even with perfect professionally-made cutouts, the model collapses ~30 points.
+
+**Verdict: INPUT-STYLE MISMATCH (not mask quality).** The model's learned features depend on
+natural-background statistics; flat-white cutout images are out-of-distribution no matter how clean
+the masks are.
+
+**Findings for the paper:**
+1. Segmentation-as-preprocessing cannot work zero-shot for a model trained on natural photos —
+   rigorously demonstrated with both crude (GrabCut, −0.14) and professional (official PV, −0.29)
+   segmenters.
+2. The model learned BACKGROUND as a shortcut feature: removing it costs ~30 points on lab data,
+   evidence that part of its disease-classification performance rests on background pattern
+   recognition rather than lesion morphology alone.
+3. Retraining on segmented data could in principle adapt features, but requires segmenting all
+   ~1300 PD train images plus full retrains of every variant — disproportionate cost for a lever
+   whose zero-shot signal starts at −0.14. Abandoned in favor of the backbone-lr sweep (Plan A).
+
+**Gotchas found along the way (all fixed):**
+- `--backbone-lr` alone does NOT unfreeze the backbone in single-head mode (only sets lr for
+  already-frozen params); needs `--unfreeze-blocks N` alongside.
+- `build_model(**model_kwargs)` crashed every single-head run because train.py stuffed the stale
+  Sprint 9 key `separate_backbones` into model_kwargs; removed (checkpoint consumers use .get()).
+- GrabCut hangs minutes per image on large photos; fixed by downscaling longest side to 800px
+  before grabCut and reducing iterations 5→3 (~2-5 min for 230 images).
+- evaluate.py dedups on variant+dataset+split+checkpoint: re-running an eval after changing labels
+  or data must use a NEW variant name or it is silently skipped (hence s10_origfix_mixed_field).
+- Step 2's CSV cleaner originally wiped s10_ rows too, destroying Step 8 results needed by 9b's
+  comparison; now cleans s9_ only.
