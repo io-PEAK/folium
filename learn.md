@@ -1018,3 +1018,39 @@ different — a model optimized for one domain cannot classify the other without
 4. IS domain shift: lab photos (clean, bright, consistent) vs field photos (noisy, variable
    lighting/angles/backgrounds) have incompatible feature distributions
 5. IS data insufficiency: PD alone (~1300 images) is too small/noisy to train a backbone
+
+### Sprint 9 PlantDoc label audit (230 test images)
+
+Ran `audit_plantdoc_labels.py` on all 230 PlantDoc test images using the field head.
+Sorted by confidence (least confident first). Key findings:
+
+**Overall:** ~100 correct (agree=TRUE) vs ~130 wrong (agree=FALSE) → 43% accuracy on test set.
+
+**Cross-species confusion dominates errors:**
+- Apple leaf predicted as Raspberry/Soybean healthy (white-background photos confuse the model)
+- Cherry leaf predicted as Apple/Peach/Raspberry healthy
+- Blueberry leaf predicted as Soybean healthy
+- Grape leaf predicted as Raspberry healthy
+- Bell_pepper leaf predicted as Potato/Soybean/Tomato diseases
+- These are model errors, NOT label errors (the species is genuinely different)
+
+**Same-species confusion (possible label errors):**
+- **Corn leaf blight ↔ Corn Gray leaf spot:** model is 0.94-0.97 confident that "Corn leaf blight"
+  images are "Corn Gray leaf spot" and vice versa. These diseases look nearly identical in field
+  photos. PlantDoc labels are likely wrong for ~10 images.
+- **Tomato diseases:** low-confidence confusions (0.20-0.40) between bacterial spot, early blight,
+  septoria, mosaic virus. Model is uncertain → not clear which labels are wrong.
+- **Potato late blight → Potato early blight:** a few at 0.96 confidence.
+
+**High-confidence mismatches (>0.80, model confident AND wrong):**
+- Corn leaf blight vs Gray leaf spot: 0.94-0.97 confidence → ~10 images likely mislabeled
+- Blueberry leaf → Soybean healthy: 0.97-0.98 confidence → model wrong (cross-species)
+- Apple leaf → Raspberry healthy: 0.89-0.94 confidence → model wrong (cross-species)
+
+**Impact on F1:** If we correct the ~10 Corn leaf blight ↔ Gray leaf spot mislabeled images
+(same-species, high-confidence), field F1 should improve by ~0.04-0.06 (230 test set, 10 fixes
+= ~4% of images). This could push field from 0.42 to 0.46-0.48.
+
+**What to fix:** Only same-species, high-confidence (>0.80) mismatches where the predicted
+disease is a plausible alternative for that species. Do NOT fix cross-species confusions
+(model is wrong, not the label).
