@@ -126,6 +126,8 @@ def main():
     parser.add_argument("--split", default="test")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be changed")
     parser.add_argument("--log", help="Path to write change log")
+    parser.add_argument("--exclude", default="",
+                        help="Comma-separated filename substrings to skip (human-rejected candidates)")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -137,6 +139,12 @@ def main():
 
     fixable = find_fixable_images(rows)
     print(f"Fixable (same-species, >0.80 confidence): {len(fixable)}")
+
+    excludes = [s.strip() for s in args.exclude.split(",") if s.strip()]
+    if excludes:
+        before = len(fixable)
+        fixable = [r for r in fixable if not any(s in Path(r["image"]).name for s in excludes)]
+        print(f"Excluded by --exclude: {before - len(fixable)}")
 
     if not fixable:
         print("No images to fix.")
