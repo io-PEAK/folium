@@ -1131,3 +1131,26 @@ the masks are.
   or data must use a NEW variant name or it is silently skipped (hence s10_origfix_mixed_field).
 - Step 2's CSV cleaner originally wiped s10_ rows too, destroying Step 8 results needed by 9b's
   comparison; now cleans s9_ only.
+
+### Sprint 10 label-fix results (real run, 2026-08-23)
+
+Audit re-run with the Sprint 9 domain checkpoint reproduced Sprint 9's stats almost exactly
+(128/230 disagreements vs ~130 then). The raw "top suspicious" list surfaces MODEL failures
+(low-confidence cross-species jumps like apple→tomato) — those are NOT label candidates. The fix
+pipeline's three gates (disagree + confidence>0.80 + same species) isolated 8 candidates.
+
+Human review of all 8 rendered images (Claude as second judge): **7 verified, 1 rejected**.
+Rejected: `tomato_bacterial-speck_01_zoom.jpg` — image shows tiny dark spots with yellow halos
+(bacterial spot/speck), not early-blight bullseyes; model's 0.966 "early blight" was wrong there.
+5 of the 7 accepted were self-documenting (filenames literally contain "gray leaf spot").
+
+Applied via `fix_plantdoc_labels.py --exclude tomato_bacterial-speck` → 7 files moved.
+
+| variant | Field F1 | Note |
+|---|---|---|
+| s10_orig_mixed_field (before fix) | 0.4107 | unfixed labels |
+| **s10_origfix_mixed_field (after fix)** | **0.4393** | new official baseline |
+
+Delta: **+0.0287** from correcting just 7/230 labels (3%). Slightly under the +0.04–0.06 estimate —
+consistent with macro-F1 weighting and 2 of the 7 being Corn GLS→blight moves that swap one class
+pair rather than fixing pure errors. Every subsequent evaluation uses the corrected test set.
