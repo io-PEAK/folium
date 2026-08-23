@@ -1054,3 +1054,29 @@ Sorted by confidence (least confident first). Key findings:
 **What to fix:** Only same-species, high-confidence (>0.80) mismatches where the predicted
 disease is a plausible alternative for that species. Do NOT fix cross-species confusions
 (model is wrong, not the label).
+
+## Phase 10 — Sprint 10: Segmentation + Backbone-lr Sweep (in progress, 2026-08-23)
+
+**What this sprint solves:** Sprint 9 proved the bottleneck is NOT backbone interference —
+it's that PD alone (~1300 images) can't train a backbone. Sprint 7's both_resnet50 hit 0.66
+field by training the backbone on BOTH PV+PD combined. The experiment nobody has tried:
+unfrozen backbone + mixed PV+PD training with tunable ratio.
+
+**Two experiments, one notebook:**
+
+1. **Segmentation diagnostic (Steps 5-9):** Strip backgrounds from PlantDoc test images
+   using OpenCV GrabCut. Fast (~1 hour, CPU only). Eval existing model on segmented data.
+   Tells us if background removal helps before committing GPU time.
+
+2. **Backbone-lr + mixed-ratio sweep (Steps 10-12):** The highest-leverage experiment.
+   Two proven ingredients combined for the first time:
+   - Unfrozen backbone at lr=1e-5 (gave 0.66 field when unfrozen on PD-only)
+   - Mixed PV+PD training with tunable ratio (gave 0.95+ lab retention)
+   Sweep plantdoc-repeat: 15, 20, 30. If segmentation helped, run on segmented data.
+
+**Order:** segmentation first (fast, informs sweep data choice), then sweep.
+
+**Gates:** field F1 >= 0.60 AND lab F1 >= 0.60 (relaxed from 0.85 per professor)
+
+**If both pass:** take that checkpoint, go to frontend.
+**If not:** report results, decide next steps.
