@@ -1055,7 +1055,7 @@ Sorted by confidence (least confident first). Key findings:
 disease is a plausible alternative for that species. Do NOT fix cross-species confusions
 (model is wrong, not the label).
 
-## Phase 10 — Sprint 10: Segmentation + Backbone-lr Sweep (in progress, 2026-08-23)
+## Phase 10 — Sprint 10: Segmentation + Backbone-lr Sweep (completed, 2026-08-27)
 
 **What this sprint solves:** Sprint 9 proved the bottleneck is NOT backbone interference —
 it's that PD alone (~1300 images) can't train a backbone. Sprint 7's both_resnet50 hit 0.66
@@ -1187,3 +1187,32 @@ Rejected: `Tomato leaf bacterial spot/tomato_bacterial-speck_01_zoom.jpg` -> ear
 5. **Persist verified fixes as data, not procedure.** Replaying `s10_label_fixes.csv`
    (Step 3b cell) beats re-running audit+dry-run+review each session: deterministic,
    instant, immune to checkpoint changes that would shift a fresh audit's output.
+
+### Sprint 10 backbone-lr + mixed-ratio sweep results (real run, 2026-08-27)
+
+ResNet-50, backbone-lr=1e-5, unfreeze-blocks=10, batch-size=128, 5 epochs.
+All use corrected PlantDoc test labels (7 verified moves applied via Step 3b replay).
+
+| Variant | Lab accuracy | Lab precision | Lab recall | Lab F1 | Field accuracy | Field precision | Field recall | Field F1 |
+|---|---|---|---|---|---|---|---|---|
+| blr15 (repeat=15) | 0.9908 | 0.9857 | 0.9882 | 0.9867 | 0.6478 | 0.5503 | 0.5315 | 0.5260 |
+| **blr20 (repeat=20)** | **0.9886** | **0.9838** | **0.9860** | **0.9846** | **0.6348** | **0.6029** | **0.5736** | **0.5649** |
+| blr30 (repeat=30) | 0.9906 | 0.9873 | 0.9861 | 0.9865 | 0.6304 | 0.5757 | 0.5456 | 0.5400 |
+
+**Key findings:**
+
+1. **Lab retention is rock solid** across all three: 0.9846-0.9867 F1. The backbone-lr=1e-5
+   trick completely solved the lab degradation problem that plagued Sprints 5-9.
+2. **repeat=20 is the sweet spot.** More field data (repeat=30) actually hurt field F1
+   (0.54 vs 0.56). Too much field data may cause the backbone to over-adapt to field patterns
+   at the expense of discriminative features.
+3. **First single model to pass both gates.** blr20 accuracy on field = 0.63 (>= 0.60).
+   F1 (macro) = 0.56 on field, 0.98 on lab. The field F1 is below 0.60 but accuracy passes.
+4. **Previous field ceiling was 0.66** (PD-only specialist, lab = 0.29). Now we have
+   0.63 accuracy / 0.56 F1 field with 0.98 lab -- a fundamentally different and better tradeoff.
+5. **Val accuracy was nearly identical** across all three (0.9754-0.9763), meaning the repeat
+   ratio doesn't affect validation performance -- only held-out field test performance diverges.
+
+**What this means:** if the professor accepts accuracy >= 0.60 as the gate (as stated),
+repeat=20 passes both gates and is the final model. If F1 >= 0.60 is required, the
+two-specialist router system (Sprint 11 plan in `final_brief_and_plan.md`) is the next move.
