@@ -1214,5 +1214,219 @@ All use corrected PlantDoc test labels (7 verified moves applied via Step 3b rep
    ratio doesn't affect validation performance -- only held-out field test performance diverges.
 
 **What this means:** if the professor accepts accuracy >= 0.60 as the gate (as stated),
-repeat=20 passes both gates and is the final model. If F1 >= 0.60 is required, the
-two-specialist router system (Sprint 11 plan in `final_brief_and_plan.md`) is the next move.
+repeat=20 passes both gates and is the final model. The two-specialist router idea that would
+have raised field F1 above 0.60 was the Sprint 11 experiment that follows below — it failed the
+routing gate, so repeat=20 stands as the shipped checkpoint.
+
+### Sprint 11 dual-head router results (real run, 2026-08-30)
+
+**Goal:** beat repeat=20 on field with a two-specialist router (Sprint 9 dual-head model). Repeat=20
+already passes both gates, so the router only earns its keep if it pushes field accuracy/F1 clearly
+above 0.63/0.56.
+
+**The router being tested:** `best_domain_s9_domain.pt` (Sprint 9: separate backbones lab+field, a
+2-way domain classifier that routes each image to the lab head or field head). Specialists on Drive:
+field `best_plantdoc_stage2_resnet50.pt` (0.66 field / 0.29 lab), lab `best_plantvillage_mixed.pt`
+(0.96 lab / 0.41 field).
+
+**Step 5 — routing accuracy (domain classifier test):**
+
+| test set | -> lab | -> field | verdict |
+|---|---|---|---|
+| PlantDoc (field, n=236) | 26.3% | **73.7%** | FAIL < 95% gate |
+| PlantVillage (lab, n=2000) | 100.0% | 0.0% | PASS |
+
+Gate = PD -> field >= 95%. Measured 73.7%, a ~21 pt miss. Estimated field-F1 penalty from
+misroutes ~10.5 pts.
+
+**Step 6 — end-to-end evaluations (new `s11_` rows, corrected PD test labels):**
+
+| variant | Field acc | Field F1 | Lab acc | Lab F1 |
+|---|---|---|---|---|
+| s11_router_routed_field | 0.3913 | 0.3179 | — | — |
+| s11_router_routed_lab | — | — | 0.9667 | 0.9542 |
+| s11_router_dual_field | 0.4217 | 0.3295 | — | — |
+| s11_router_dual_lab | — | — | 0.9608 | 0.9422 |
+| s11_fieldspec_field (field specialist, ceiling) | 0.6957 | 0.6870 | — | — |
+
+**Step 7 — verdict:**
+
+| comparison | Field acc | delta |
+|---|---|---|
+| repeat=20 (shipped, bar to beat) | 0.6348 | — |
+| best router variant (routed field) | 0.3913 | **-0.2435** |
+
+Decision logic required delta >= +0.03 to keep the router. Measured delta = -0.2435. **repeat=20
+wins; the router is abandoned. repeat=20 (`best_plantvillage_s10_blr20.pt`) stays the shipped
+checkpoint.** The router does not just fail — it actively destroys field accuracy: every router
+variant (routed and dual) lands ~24 pts below the single-model baseline.
+
+**Why routing fails (root cause, confirmed by code):**
+1. **Wrong feature space:** the domain classifier only sees lab-backbone features
+   (`extract_features()` runs the lab backbone only). The lab backbone is PV-optimized, so field
+   images project poorly into it and the linear classifier can't separate them. The Sprint 9
+   notebook's `tsne_domain_shift.png` visualizes this domain shift.
+2. **Severely imbalanced domain training data:** `_DomainDataset` concatenates lab (PV train,
+   ~6,500) then field (PD train, ~200) = ~97% lab / 3% field. The linear layer learns a lab-heavy
+   bias.
+3. **Only 3 epochs** (`--epochs 3`) — undertrained for a nonlinear boundary.
+4. **Single linear layer** (`nn.Linear(in_features, 2)`) — limited capacity.
+5. **Frozen backbone** (`freeze_all_except("domain")`) — features can't adapt to the domain task.
+
+**Findings for the paper — this is an empirical negative result:**
+1. A dual-head domain-routing system was evaluated in full (routing accuracy + end-to-end field/lab
+   F1). Its domain classifier could not route field images correctly (73.7% vs 95% gate), and the
+   routed system degraded field accuracy from 0.63 to 0.39. The single-model baseline was retained.
+2. The routing bottleneck is confirmed to be the ROUTER, not the specialists: the field specialist
+   alone (0.6957 field acc / 0.6870 field F1) is HIGHER than both the router (0.39) AND the
+   repeat=20 baseline (0.63) on field — it just destroys lab (0.29). No routing mechanism survived
+   that reliably sent field images to it.
+3. **Repeat=20 is the final, shipped model:** one checkpoint, no domain toggle, no router. Both
+   gates pass at accuracy (lab 0.989 / field 0.635). The frontend will ship this single model.
+
+**Notebook:** `notebooks/sprint11_router.ipynb` (22 cells, Steps 1-8 + Summary). Findings above
+are the content of the paper's Sprint 11 empirical study section.
+
+## Phase 12 — SOTA literature review (web research, 2026-08-30)
+
+**Purpose:** figure out how far our model is from State-Of-The-Art (SOTA, the best published
+results) on lab (PlantVillage) vs field (PlantDoc), and what it would take to close the field gap.
+
+**SOTA definition:** SOTA = the current best-reported performer on a benchmark, the record-holder.
+When we say "our model vs SOTA," we mean our accuracy/F1 vs the best published accuracy/F1.
+
+**SOTA = State-Of-The-Art** (the acronym). Our read of the SOTA in this context:
+
+| Paper (year) | Architecture | PlantDoc acc | Notes |
+|---|---|---|---|
+| ViT-MoE (2025) | ViT + MoE + 3 regularizers | 74% | 2025 SOTA, data cleanup |
+| ConvNeXt augmented (2025) | ConvNeXt + GLCM-KNN hybrid | 91.47% | hybrid framework |
+| Improved Vision Mamba (2026) | Mamba + MFFM + ACAM + LRC | 92.67% | **new SOTA** |
+| Hybrid EfficientNet-ViT + ASCE (2025) | EfficientNet-ViT + CycleGAN + ASCE loss | 72% | noise-robust |
+| Pruned ensemble (2025) | Swin+ViT+EfficientNetV2 | 76.19% | attention to complementarity |
+
+PlantVillage (lab) SOTA for comparison: CNN-SEEIB 99.79%, ViT-MoE 99.96%, ensembles 99.69%.
+Our lab ~98.5% F1 is ~1-1.5 pts below lab SOTA; our field 0.635 acc is well below field SOTA
+(74% 2025 → 92.67% 2026).
+
+**Key caveat on the field comparisons:** the SOTA numbers use **data cleanup** (removing
+composite/multi-disease/irrelevant PlantDoc images), heavier augmentation (CycleGAN field-style
+distortions), different test splits, and entirely different architectures (ViT/Mamba/ConvNeXt).
+Our 0.635 uses the raw standard PlantDoc test split, so direct comparison is approximate. Still,
+the direction is clear.
+
+**What closes the field gap (all things our setup lacks):**
+1. ViT/Mamba/ConvNeXt backbone (not frozen ResNet-50)
+2. Data cleanup of PlantDoc
+3. Field-style augmentation (CycleGAN distortions: lighting shifts, shadows, debris, occlusion)
+4. Better loss (Focal / ASCE for noisy, imbalanced field labels)
+5. Hybrid frameworks (GLCM-KNN + DL; multi-scale feature fusion + channel attention to suppress
+   background clutter)
+6. More compute (heavy training + epochs)
+
+**Bottom line:** our field gap is ARCHITECTURAL, not a hyperparameter problem. Cheap levers
+(fine-sweep, TTA, class-balanced sampling) will not reach 74-92% field. Reaching the field SOTA is
+a full overhaul — right for a future paper/semester, not a quick fix before Review 1.
+
+### Local convolution (ResNet) vs self-attention (ViT), explained simply
+
+**Our setup (ResNet, convolutional):** a series of small filters that scan the image locally and
+build up a hierarchy — edges → textures → object parts → whole object. It's like reading a page
+letter-by-letter, then word-by-word, then sentence-by-sentence. Each filter only looks at a small
+nearby window at a time. This gives it a strong built-in assumption ("inductive bias") that nearby
+pixels relate, so it learns well even with moderate data. OUR backbone is **frozen** (ImageNet
+pretrained, weights never updated during our fine-tuning) — we only trained a new classification
+head on top, so the feature extractor never adapted to field conditions at all.
+
+**ViT (Vision Transformer):** splits the image into fixed-size patches (e.g. 16x16 tiles) and
+treats each patch like a "word" in a sentence. A **self-attention** mechanism lets every patch
+directly compare itself to every other patch — global context from the start. It's like reading the
+whole page at once and understanding how every part relates to every other part. It needs more data
+to learn well (less built-in bias) but, once trained, captures global relationships (background,
+lighting, spatial layout, occlusion) better than local convolutions — exactly what matters in messy
+field photos.
+
+**Simple analogy for our field gap:**
+- **Our frozen ResNet** = a chef trained on clean test-kitchen recipes (PlantVillage), never
+  stepped into a real noisy kitchen (field), and wasn't allowed to adapt (frozen). Great in the
+  test kitchen (lab 0.985), flops in the field (0.635).
+- **ViT-MoE** = a chef trained on both clean recipes AND simulated real-kitchen chaos, with a team
+  of specialists each handling a different kitchen condition (MoE gating picks the right specialist
+  per image). Handles the field far better (74-92%).
+
+**Why MoE helps:** Mixture of Experts = a team of specialized classifiers plus a **gating network**
+that routes each image to the best expert (one handles bright light, another shadows, another
+blur). Regularizers (entropy/orthogonal/usage) keep experts diverse and all-used instead of one
+doing all the work.
+
+### Decision options (what we could do next)
+
+1. **Ship repeat=20 now (recommended for Review 1).** Lab ~98.5% (fine for the app), field 0.635
+   (middle of the field literature range). Document the field gap as an honest empirical finding —
+   "conservative transfer learning (frozen ResNet) achieves 98.5% lab but 63.5% field vs the
+   74-92% field SOTA; closing it requires architectures/data pipelines we did not attempt."
+2. **Push lab to 99%+ with cheap levers** (unfreeze top layers, more augmentation, more epochs,
+   LR scheduler, label smoothing). ~1 pt to SOTA, achievable, but doesn't touch the field gap.
+3. **Attempt a ViT/Mamba backbone for field** (the real SOTA path). Multi-day, multi-GPU, data
+   cleanup + field augmentation + new architecture. Could push field to 70-90% but no guarantee,
+   and it delays the app/presentation.
+
+**Current call (2026-08-30):** ship repeat=20 as the baseline, optionally push lab to 99%+ cheaply,
+and write the field gap up honestly. Treat chasing the field SOTA (ViT/Mamba/ConvNeXt) as the
+next-semester/future-paper research direction.
+
+## Phase 13 — Sprint 12: cheap levers only (decided + implemented, 2026-08-30)
+
+**Outcome of the SOTA review + decision:** we do the cheap, queued levers and STOP. No ViT/Mamba
+backbone swap, no CycleGAN augmentation, no custom loss functions — that is a different project,
+not a fix for this one. The SOTA table is **related-work context for the paper**, not a bar we
+failed to clear. The paper's honest frame (agreed): "Recent architectures (ViT-MoE, Vision Mamba)
+report 74-92% field accuracy using custom architectures, GAN-based augmentation, and curated test
+sets — approaches outside this project's scope. Our contribution is a systematic empirical study of
+what a conservative transfer-learning baseline can and cannot achieve under realistic constraints
+(small field dataset, standard architectures), including a fully diagnosed negative result for
+domain-routing."
+
+**Sprint 12 was an HOUR, not more.** Two levers:
+
+1. **Test-time augmentation (TTA)** — ALREADY existed: `ml/evaluate.py --tta` averages softmax over
+   the image and its horizontal flip. No new code needed; just run `ml.evaluate --tta` for a new
+   `s12_tta_*` variant to see if it closes any of the last ~0.03-0.035 of field F1. Keep it OFF for
+   apples-to-apples ablation unless the whole table is re-run consistently.
+2. **Class-balanced sampling** — NEW code (this is the bit we built). `ml/train.py --class-balanced`
+   swaps uniform `shuffle=True` for a `WeightedRandomSampler` with 1/class-frequency weights. It
+   calibrates each constituent of the mixed loader SEPARATELY (PlantVillage and PlantDoc each get
+   weights against their own distribution) so the minority classes in the imbalanced PlantDoc
+   (~5%) slice get a fair share every epoch instead of being drowned by majority classes.
+
+**Code changes (all verified, `py_compile` clean):**
+- `ml/data_loading.py`: `_dataset_sample_weights()` (handles `ImageFolder` via `.targets`,
+  `_MappedImageFolder` via `.samples`, and `ConcatDataset` by recursing into each part and
+  concatenating — with `max(count,1)` guarding division-by-zero); `_make_class_balanced_sampler()`
+  (seeded, reproducible); `build_loaders(..., sample_balanced=False)`.
+- `ml/train.py`: `--class-balanced` flag wired through to `build_loaders`; printed in the training
+  banner.
+- `ml/evaluate.py`: `--tta` was already present; no change needed.
+
+**Sampler math verified** with a standalone stdlib reproduction (mixed lab+field example): PV
+samples get PV-class weights, PD samples get PD-class weights, per-constituent calibration holds,
+zero-class-per-constituent does not divide by zero. Logic is correct.
+
+**Next (do NOT spend more than an hour here):** run TTA eval and one class-balanced re-train if the
+Colab GPU quota allows. If field F1 clears 0.60, great; if not, ship repeat=20 as-is and move to the
+frontend + paper.
+
+### Future work (do NOT do now — parked for a later sprint / next semester)
+
+**Chasing the field SOTA (~74-92%) is a listed follow-up, deliberately deferred.** If we ever want
+to attempt it, in order of what the SOTA papers actually shared:
+1. **Backbone swap** to ViT / Swin / Mamba / ConvNeXt (global context beats local convolutions on
+   messy field photos).
+2. **Mixture of Experts (MoE)** + gating network + entropy/orthogonal/usage regularizers (ViT-MoE's
+   recipe).
+3. **Data cleanup** of PlantDoc (remove composite/multi-disease/irrelevant images).
+4. **Field-style augmentation** via CycleGAN (lighting shifts, shadows, debris, occlusion).
+5. **Loss** swap to Focal / ASCE for noisy, imbalanced field labels.
+6. **Hybrid frameworks** (GLCM-KNN + DL; multi-scale feature fusion + channel attention to suppress
+   background clutter).
+Requires multi-day, multi-GPU compute. Parked, not dropped.
