@@ -6,6 +6,11 @@
   brightness/contrast, blur, perspective, JPEG compression artifacts) applied
   to the TRAINING split only. Val/test are NEVER augmented — evaluation must
   be deterministic.
+- `sample_balanced=True`: Sprint 12 lever. Replaces `shuffle=True` with a
+  WeightedRandomSampler whose per-sample weight is 1/class-frequency, so each
+  class is seen equally per epoch regardless of how imbalanced the (mixed)
+  training set is. Designed for the PlantDoc-in-mixed case, where a few
+  majority classes otherwise dominate every epoch.
 
 Data is expected in the layout produced by scripts/organize_datasets.py:
 
@@ -128,6 +133,57 @@ def _load_class_map(data_dir: Path) -> dict:
     return json.loads(path.read_text())["plantdoc_to_plantvillage"]
 
 
+def _dataset_sample_weights(dataset, num_classes: int | None = None) -> np.ndarray:
+    """Per-sample class weights (1 / class frequency) for WeightedRandomSampler.
+
+    Handles the three dataset types build_loaders can assemble:
+    - ``ImageFolder`` (has ``.targets``)
+    - ``_MappedImageFolder`` (PlantDoc mapped to PV labels; uses ``._classes``)
+    - ``ConcatDataset`` of the above (mixed PlantVillage + PlantDoc)
+
+    Each constituent's per-sample weight is computed against ITS OWN class
+    distribution first (lab and field imbalances are calibrated separately),
+    then the whole set is concatenated. Without this, the ~5%-field mixed set
+    would weight every PlantDoc sample by the huge PlantVillage class counts.
+    """
+    if isinstance(dataset, torch.utils.data.ConcatDataset):
+        parts = []
+        for sub in dataset.datasets:
+            w = _dataset_sample_weights(sub, num_classes)
+            if w is not None:
+                parts.append(w)
+        if not parts:
+            return None
+        return np.concatenate(parts)
+
+    if isinstance(dataset, datasets.ImageFolder):
+        targets = np.asarray(dataset.targets, dtype=np.int64)
+    elif isinstance(dataset, _MappedImageFolder):
+        targets = np.asarray([s[1] for s in dataset.samples], dtype=np.int64)
+    else:
+        return None
+
+    class_counts = np.bincount(targets, minlength=num_classes or int(targets.max()) + 1)
+    class_weights = 1.0 / np.maximum(class_counts, 1)
+    return class_weights[targets]
+
+
+def _make_class_balanced_sampler(dataset, num_classes: int | None, seed: int):
+    """WeightedRandomSampler with 1/class-frequency weights, seeded + reproducible."""
+    weights = _dataset_sample_weights(dataset, num_classes)
+    if weights is None:
+        raise ValueError("class-balanced sampling unsupported for this dataset type")
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    n = len(weights)
+    return torch.utils.data.WeightedRandomSampler(
+        torch.as_tensor(weights, dtype=torch.double),
+        num_samples=n,
+        replacement=True,
+        generator=generator,
+    )
+
+
 def build_loaders(
     data_dir: str,
     dataset: str = "plantvillage",
@@ -139,6 +195,7 @@ def build_loaders(
     map_to_pv: bool = False,
     mix_with: str | None = None,
     plantdoc_repeat: int = 1,
+    sample_balanced: bool = False,
 ) -> tuple[DataLoader, DataLoader, DataLoader, list[str]]:
     """Build train/val/test DataLoaders (ImageFolder) for one dataset.
 
@@ -225,12 +282,17 @@ def build_loaders(
         "pin_memory": pin_memory,
         "worker_init_fn": _worker_init_fn,
     }
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, generator=generator, **common
-    )
+    if sample_balanced and len(train_ds) > 0:
+        sampler = _make_class_balanced_sampler(train_ds, len(class_names), seed)
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, sampler=sampler, **common
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, shuffle=True, generator=generator, **common
+        )
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **common)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **common)
-
     return train_loader, val_loader, test_loader, class_names
 
 

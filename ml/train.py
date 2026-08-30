@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
                         help="Sprint 6: repeat the PlantDoc train set N times inside the mixed "
                              "loader so field photos get a bigger share of every epoch (PlantDoc is "
                              "naturally ~5 percent; e.g. 8 -> ~28 percent). Only used with --mix-with plantdoc.")
+    parser.add_argument("--class-balanced", action="store_true",
+                        help="Sprint 12: sample the training set class-balanced (WeightedRandomSampler "
+                             "with 1/class-frequency weights) instead of uniform shuffle. Calibrates "
+                             "each constituent (lab + field) separately, so minority classes in the "
+                             "imbalanced PlantDoc-in-mixed set get a fair share every epoch.")
     parser.add_argument("--dual-head", action="store_true",
                         help="Sprint 8: use DualHeadModel with two independent classification "
                              "heads (head_lab + head_field) instead of a single shared head. "
@@ -330,6 +335,7 @@ def main() -> None:
         map_to_pv=args.map_to_pv,
         mix_with=args.mix_with,
         plantdoc_repeat=args.plantdoc_repeat,
+        sample_balanced=args.class_balanced,
     )
     model_kwargs = {"num_classes": len(class_names), "backbone": args.backbone, "pretrained": True,
                      "freeze": True}
@@ -429,7 +435,8 @@ def main() -> None:
           f"{len(class_names)} classes), {args.epochs} epochs, "
           f"backbone={args.backbone}, lr={args.lr}, head_lr={args.head_lr or args.lr}, "
           f"backbone_lr={args.backbone_lr}, "
-          f"augmentation={'ON' if args.augment else 'OFF'}, tag={args.tag}", flush=True)
+          f"augmentation={'ON' if args.augment else 'OFF'}, "
+          f"class_balanced={'ON' if args.class_balanced else 'OFF'}, tag={args.tag}", flush=True)
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, active_head=args.train_head)
         val_loss, val_acc = validate(model, val_loader, criterion, device, active_head=args.train_head)
